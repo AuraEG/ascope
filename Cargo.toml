@@ -2,6 +2,11 @@
 name = "ascope"
 version = "0.1.0"
 edition = "2021"
+authors = ["Ahmed Ashour"]
+description = "Blazingly fast terminal workspace inspector and navigation utility"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/AuraEG/ascope"
+readme = "README.md"
 
 [dependencies]
 clap     = { version = "4.4.0", features = ["derive"] }
@@ -11,6 +16,33 @@ serde_json = "1.0"
 ratatui  = "0.26.1"
 crossterm = "0.27.0"
 syntect  = "5.1.0"
+
+[package.metadata.deb]
+maintainer = "Ahmed Ashour"
+copyright = "2026, Ahmed Ashour"
+section = "utils"
+priority = "optional"
+extended-description = """
+AuraScope is a high-performance terminal workspace inspector and navigation
+utility. It combines parallel directory scanning, interactive navigation,
+live search, code previews, and shell warp integration into a single TUI.
+"""
+assets = [
+  ["target/release/ascope", "usr/bin/ascope", "755"],
+  ["src/shell/ascope.sh", "usr/share/ascope/ascope.sh", "644"],
+  ["src/shell/ascope.ps1", "usr/share/ascope/ascope.ps1", "644"],
+  ["README.md", "usr/share/doc/ascope/README.md", "644"],
+]
+
+[package.metadata.generate-rpm]
+summary = "Blazingly fast terminal workspace inspector and navigation utility"
+release = "1"
+assets = [
+  { source = "target/release/ascope", dest = "/usr/bin/ascope", mode = "755" },
+  { source = "src/shell/ascope.sh", dest = "/usr/share/ascope/ascope.sh", mode = "644" },
+  { source = "src/shell/ascope.ps1", dest = "/usr/share/ascope/ascope.ps1", mode = "644" },
+  { source = "README.md", dest = "/usr/share/doc/ascope/README.md", mode = "644", doc = true },
+]
 
 [dev-dependencies]
 tempfile = "3"
