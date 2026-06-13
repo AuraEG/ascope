@@ -138,11 +138,15 @@ mod tests {
         std::fs::create_dir(&sub_dir).unwrap();
         let file_path2 = sub_dir.join("file2.log");
 
-        let mut f1 = File::create(file_path1).unwrap();
-        f1.write_all(b"hello").unwrap(); // 5 bytes
+        {
+            let mut f1 = File::create(file_path1).unwrap();
+            f1.write_all(b"hello").unwrap(); // 5 bytes
+        }
 
-        let mut f2 = File::create(file_path2).unwrap();
-        f2.write_all(b"rust-systems").unwrap(); // 12 bytes
+        {
+            let mut f2 = File::create(file_path2).unwrap();
+            f2.write_all(b"rust-systems").unwrap(); // 12 bytes
+        }
 
         let stats = scan_path(dir.path()).unwrap();
         assert_eq!(stats.total_size, 17);
@@ -163,8 +167,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let sub = dir.path().join("pkg");
         std::fs::create_dir(&sub).unwrap();
-        let mut f = File::create(sub.join("lib.rs")).unwrap();
-        f.write_all(b"fn main() {}").unwrap(); // 12 bytes
+        {
+            let mut f = File::create(sub.join("lib.rs")).unwrap();
+            f.write_all(b"fn main() {}").unwrap(); // 12 bytes
+        }
 
         let stats = scan_path(dir.path()).unwrap();
         assert_eq!(*stats.subdirs.get(&sub).unwrap(), 12);

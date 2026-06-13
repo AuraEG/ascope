@@ -11,6 +11,7 @@
 
 use std::path::Path;
 
+use once_cell::sync::Lazy;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
@@ -22,6 +23,9 @@ use syntect::{
 };
 
 use crate::app::AppState;
+
+static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines);
+static THEME_SET: Lazy<ThemeSet> = Lazy::new(ThemeSet::load_defaults);
 
 // --------------------------------------------------------------------------
 // [SECTION] Dashboard Renderer
@@ -103,7 +107,7 @@ fn render_tree(f: &mut Frame, state: &AppState, area: Rect) {
 fn render_right_pane(f: &mut Frame, state: &AppState, area: Rect) {
     if let Some((path, _)) = state.selected_item() {
         if path.is_file() {
-            render_file_preview(f, &path, area);
+            render_file_preview(f, state, area);
             return;
         }
     }
@@ -134,54 +138,68 @@ fn render_size_bars(f: &mut Frame, state: &AppState, area: Rect) {
     f.render_widget(List::new(items).block(block), area);
 }
 
-fn render_file_preview(f: &mut Frame, path: &Path, area: Rect) {
-    let title = path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    let block = Block::default()
-        .title(format!(" Preview: {title} "))
-        .borders(Borders::ALL);
+fn render_file_preview(f: &mut Frame, state: &AppState, area: Rect) {
+    if let Some((path, _)) = state.selected_item() {
+        let title = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let block = Block::default()
+            .title(format!(" Preview: {title} "))
+            .borders(Borders::ALL);
 
-    let lines = build_preview_lines(path);
-    let preview = Paragraph::new(Text::from(lines))
-        .block(block)
-        .wrap(Wrap { trim: false });
-    f.render_widget(preview, area);
+        let lines = state.preview_lines().to_vec();
+        let preview = Paragraph::new(Text::from(lines))
+            .block(block)
+            .wrap(Wrap { trim: false });
+        f.render_widget(preview, area);
+    }
 }
 
-fn build_preview_lines(path: &Path) -> Vec<Line<'static>> {
+pub fn build_preview_lines(path: &Path) -> Vec<Line<'static>> {
     match load_preview_source(path) {
         Ok(source) => highlight_preview_source(path, &source),
-        Err(error) => vec![Line::from(format!("[x] Preview error: {error}"))],
+        Err(error) => {
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                vec![Line::from("[Binary File - Preview Not Available]")]
+            } else {
+                vec![Line::from(format!("[x] Preview error: {error}"))]
+            }
+        }
     }
 }
 
 fn load_preview_source(path: &Path) -> std::io::Result<String> {
-    let source = std::fs::read_to_string(path)?;
-    Ok(source.lines().take(100).collect::<Vec<_>>().join("\n"))
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut content = String::new();
+
+    for line in reader.lines().take(100) {
+        content.push_str(&line?);
+        content.push('\n');
+    }
+    Ok(content)
 }
 
 fn highlight_preview_source(path: &Path, source: &str) -> Vec<Line<'static>> {
-    let syntax_set = SyntaxSet::load_defaults_newlines();
-    let theme_set = ThemeSet::load_defaults();
-    let syntax = syntax_set
+    let syntax = SYNTAX_SET
         .find_syntax_for_file(path)
         .ok()
         .flatten()
-        .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
-    let theme = theme_set
+        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+    let theme = THEME_SET
         .themes
         .get("base16-ocean.dark")
-        .unwrap_or_else(|| theme_set.themes.values().next().expect("default theme"));
+        .unwrap_or_else(|| THEME_SET.themes.values().next().expect("default theme"));
     let mut highlighter = HighlightLines::new(syntax, theme);
     let mut lines = Vec::new();
 
-    for line in source.lines() {
-        let mut input = line.to_string();
-        input.push('\n');
-        match highlighter.highlight_line(&input, &syntax_set) {
+    for line in source.split_inclusive('\n') {
+        match highlighter.highlight_line(line, &SYNTAX_SET) {
             Ok(ranges) => {
                 let spans = ranges
                     .into_iter()
@@ -249,5 +267,14 @@ mod tests {
 
         let preview = load_preview_source(&file_path).unwrap();
         assert!(preview.contains("fn main() {}"));
+    }
+
+    #[test]
+    fn test_syntax_set_lazy_init() {
+        let ext = SYNTAX_SET.find_syntax_by_extension("rs");
+        assert!(ext.is_some());
+
+        let theme = THEME_SET.themes.get("base16-ocean.dark");
+        assert!(theme.is_some());
     }
 }

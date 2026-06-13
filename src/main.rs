@@ -89,6 +89,7 @@ fn event_loop(
     let events = ui::event::EventHandler::new(Duration::from_millis(16));
 
     loop {
+        state.update_preview_cache();
         terminal.draw(|f| ui::widgets::render_dashboard(f, &state))?;
 
         match events.next()? {

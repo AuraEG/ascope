@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use jwalk::WalkDir;
 
 use crate::fs::walker::{scan_path_async, PathStats, ScanProgress};
+use ratatui::text::Line;
 
 // --------------------------------------------------------------------------
 // [SECTION] State
@@ -39,6 +40,8 @@ pub struct AppState {
     pub search_query: String,
     /// Flag indicating if the background scan results have already been applied to `items`.
     scan_applied: bool,
+    /// Cache for the highlighted preview lines of the currently selected file.
+    preview_cache: Option<(PathBuf, Vec<Line<'static>>)>,
 }
 
 // --------------------------------------------------------------------------
@@ -68,6 +71,7 @@ impl AppState {
             search_mode: false,
             search_query: String::new(),
             scan_applied: false,
+            preview_cache: None,
         }
     }
 
@@ -117,6 +121,37 @@ impl AppState {
             drop(stats);
             self.items = new_items;
             self.scan_applied = true;
+        }
+    }
+
+    /// Check if the currently highlighted item is a file and update the
+    /// preview cache if the selected file has changed.
+    pub fn update_preview_cache(&mut self) {
+        let selected = self.selected_item().map(|x| x.0);
+
+        if let Some((cached_path, _)) = &self.preview_cache {
+            if Some(cached_path) == selected.as_ref() {
+                return;
+            }
+        }
+
+        if let Some(path) = selected {
+            if path.is_file() {
+                let lines = crate::ui::widgets::build_preview_lines(&path);
+                self.preview_cache = Some((path, lines));
+                return;
+            }
+        }
+
+        self.preview_cache = None;
+    }
+
+    /// Access the cached highlighted lines of the currently selected file.
+    pub fn preview_lines(&self) -> &[Line<'static>] {
+        if let Some((_, lines)) = &self.preview_cache {
+            lines
+        } else {
+            &[]
         }
     }
 
@@ -412,5 +447,36 @@ mod tests {
 
         // Subsequent polls should be no-ops and not lock indefinitely
         state.poll_scan();
+    }
+
+    #[test]
+    fn test_preview_cache_updates_and_caches() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("code.rs");
+        let mut f = File::create(&file_path).unwrap();
+        f.write_all(b"fn test() {}\n").unwrap();
+
+        let mut state = AppState::new(dir.path().to_path_buf());
+        wait_for_scan(&mut state);
+
+        // Set state items explicitly for cursor movement/selection testing
+        state.items = vec![(file_path.clone(), 12)];
+        state.selected_index = 0;
+
+        // Verify initially cache is empty
+        assert!(state.preview_lines().is_empty());
+
+        // Update preview cache
+        state.update_preview_cache();
+
+        // Check if cache contains the selected file lines
+        let lines = state.preview_lines();
+        assert!(!lines.is_empty());
+        assert!(lines[0].to_string().contains("fn test()"));
+
+        // Change selection to None (or clear items) and check that cache is cleared
+        state.items.clear();
+        state.update_preview_cache();
+        assert!(state.preview_lines().is_empty());
     }
 }
