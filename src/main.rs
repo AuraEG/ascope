@@ -18,7 +18,7 @@ use std::{io, path::PathBuf, time::Duration};
 
 use clap::Parser;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{DisableMouseCapture, EnableMouseCapture, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -85,15 +85,17 @@ fn event_loop(
     root: PathBuf,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let mut state = app::AppState::new(root);
+    // Configurable tick rate of 16ms (~60fps) for smooth animations and updates.
+    let events = ui::event::EventHandler::new(Duration::from_millis(16));
 
     loop {
-        // Check if the background scan has completed and rebuild items if so.
-        state.poll_scan();
         terminal.draw(|f| ui::widgets::render_dashboard(f, &state))?;
 
-        // Short timeout keeps the loop responsive without burning CPU.
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
+        match events.next()? {
+            ui::event::AppEvent::Tick => {
+                state.poll_scan();
+            }
+            ui::event::AppEvent::Key(key) => {
                 if state.search_mode {
                     match key.code {
                         KeyCode::Esc => state.toggle_search_mode(),
@@ -105,25 +107,29 @@ fn event_loop(
                         KeyCode::Char(c) => state.push_search_char(c),
                         _ => {}
                     }
-                    continue;
-                }
-
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Char('/') => state.toggle_search_mode(),
-                    KeyCode::Down | KeyCode::Char('j') => state.move_selection(1),
-                    KeyCode::Up | KeyCode::Char('k') => state.move_selection(-1),
-                    KeyCode::Enter => state.navigate_in(),
-                    KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
-                        if state.search_query.is_empty() {
-                            state.navigate_out();
-                        } else {
-                            state.clear_search();
+                } else {
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => break,
+                        KeyCode::Char('/') => state.toggle_search_mode(),
+                        KeyCode::Down | KeyCode::Char('j') => state.move_selection(1),
+                        KeyCode::Up | KeyCode::Char('k') => state.move_selection(-1),
+                        KeyCode::Enter => state.navigate_in(),
+                        KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
+                            if state.search_query.is_empty() {
+                                state.navigate_out();
+                            } else {
+                                state.clear_search();
+                            }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
+            ui::event::AppEvent::Resize(_, _) => {
+                // The terminal backend automatically updates its size representation;
+                // next iteration will redraw at the correct size.
+            }
+            ui::event::AppEvent::Mouse(_) => {}
         }
     }
 
