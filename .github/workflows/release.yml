@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             archive_name: ascope-linux-amd64.tar.gz
             exe_suffix: ""
@@ -59,7 +59,7 @@ jobs:
           path: dist/${{ matrix.archive_name }}
 
   build-linux-packages:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 

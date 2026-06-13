@@ -105,4 +105,6 @@ Linux package metadata is defined in `Cargo.toml` for:
 - `cargo-deb`
 - `cargo-generate-rpm`
 
+Linux release artifacts are built on `ubuntu-22.04` to keep the minimum `glibc` requirement low enough for Debian 12 / Ubuntu 22.04 class systems. This avoids the runtime breakage you get when building on newer `ubuntu-latest` images with a newer C library baseline.
+
 The published GitHub release body is sourced from `.github/release-body.md` and intentionally uses plain project-style prose with no emoji decoration.
