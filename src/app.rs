@@ -26,8 +26,12 @@ pub struct AppState {
     pub active_stats: PathStats,
     /// Direct child directories sorted by size descending; drives the list.
     pub items: Vec<(PathBuf, u64)>,
-    /// Index of the highlighted row in `items`.
+    /// Index of the highlighted row in the currently visible item set.
     pub selected_index: usize,
+    /// Whether the bottom search overlay is currently focused.
+    pub search_mode: bool,
+    /// Current live substring query used to filter visible rows.
+    pub search_query: String,
 }
 
 // --------------------------------------------------------------------------
@@ -48,15 +52,27 @@ impl AppState {
             active_stats: stats,
             items,
             selected_index: 0,
+            search_mode: false,
+            search_query: String::new(),
+        }
+    }
+
+    /// Return the currently visible items, filtered when search is active.
+    pub fn visible_items(&self) -> Vec<(PathBuf, u64)> {
+        if self.search_query.is_empty() {
+            self.items.clone()
+        } else {
+            self.filter_query(&self.search_query)
         }
     }
 
     /// Descend into the currently selected sub-directory and rescan.
     pub fn navigate_in(&mut self) {
-        if self.items.is_empty() {
+        let visible = self.visible_items();
+        if visible.is_empty() {
             return;
         }
-        let target = self.items[self.selected_index].0.clone();
+        let target = visible[self.selected_index].0.clone();
         if target.is_dir() {
             *self = Self::new(target);
         }
@@ -71,7 +87,7 @@ impl AppState {
 
     /// Move the selection cursor by `delta` rows, wrapping at both ends.
     pub fn move_selection(&mut self, delta: isize) {
-        let len = self.items.len();
+        let len = self.visible_items().len();
         if len == 0 {
             return;
         }
@@ -80,6 +96,40 @@ impl AppState {
             d if d > 0 => (self.selected_index + 1) % len,
             _ => self.selected_index.checked_sub(1).unwrap_or(len - 1),
         };
+    }
+
+    /// Toggle search-mode focus. Leaving search mode preserves the query so the
+    /// user can inspect the filtered results before clearing it.
+    pub fn toggle_search_mode(&mut self) {
+        self.search_mode = !self.search_mode;
+    }
+
+    /// Clear the active query and reset the cursor to the first visible row.
+    pub fn clear_search(&mut self) {
+        self.search_query.clear();
+        self.selected_index = 0;
+    }
+
+    /// Append one typed character to the live query.
+    pub fn push_search_char(&mut self, ch: char) {
+        self.search_query.push(ch);
+        self.selected_index = 0;
+    }
+
+    /// Delete the most recent search character.
+    pub fn pop_search_char(&mut self) {
+        self.search_query.pop();
+        self.selected_index = 0;
+    }
+
+    /// Case-insensitive substring match over rendered path strings.
+    pub fn filter_query(&self, query: &str) -> Vec<(PathBuf, u64)> {
+        let q = query.to_lowercase();
+        self.items
+            .iter()
+            .filter(|(path, _)| path.to_string_lossy().to_lowercase().contains(&q))
+            .cloned()
+            .collect()
     }
 }
 
@@ -136,5 +186,49 @@ mod tests {
         let mut state = AppState::new(dir.path().to_path_buf());
         // Ascending from a temp dir must not panic regardless of depth.
         state.navigate_out();
+    }
+
+    #[test]
+    fn test_live_filter_items() {
+        let mut state = AppState::new(PathBuf::from("."));
+        state.items = vec![
+            (PathBuf::from("Cargo.toml"), 100),
+            (PathBuf::from("src/main.rs"), 500),
+            (PathBuf::from("src/app.rs"), 300),
+        ];
+
+        let filtered = state.filter_query("main");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0, PathBuf::from("src/main.rs"));
+    }
+
+    #[test]
+    fn test_visible_items_uses_search_query() {
+        let mut state = AppState::new(PathBuf::from("."));
+        state.items = vec![
+            (PathBuf::from("Cargo.toml"), 100),
+            (PathBuf::from("src/main.rs"), 500),
+            (PathBuf::from("src/app.rs"), 300),
+        ];
+        state.search_query = String::from("app");
+
+        let visible = state.visible_items();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].0, PathBuf::from("src/app.rs"));
+    }
+
+    #[test]
+    fn test_search_editing_resets_selection() {
+        let mut state = AppState::new(PathBuf::from("."));
+        state.items = vec![(PathBuf::from("alpha"), 1), (PathBuf::from("beta"), 1)];
+        state.selected_index = 1;
+
+        state.push_search_char('a');
+        assert_eq!(state.selected_index, 0);
+        assert_eq!(state.search_query, "a");
+
+        state.pop_search_char();
+        assert_eq!(state.selected_index, 0);
+        assert!(state.search_query.is_empty());
     }
 }
