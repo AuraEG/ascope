@@ -79,10 +79,16 @@ fn render_tree(f: &mut Frame, state: &AppState, area: Rect) {
         .collect();
 
     #[allow(clippy::cast_precision_loss)]
-    let total_mb = state.active_stats.total_size as f64 / 1_000_000.0;
+    let total_mb = state.total_size() as f64 / 1_000_000.0;
+    let progress = state.scan_progress_label();
+    let scan_label = if progress.is_empty() {
+        String::new()
+    } else {
+        format!(" {progress}")
+    };
     let block = Block::default()
         .title(format!(
-            " {} [{total_mb:.2} MB] ",
+            " {}{scan_label} [{total_mb:.2} MB] ",
             state.current_path.display()
         ))
         .borders(Borders::ALL);
