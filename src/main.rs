@@ -11,6 +11,7 @@
 
 mod app;
 mod fs;
+mod shell;
 mod ui;
 
 use std::{io, path::PathBuf, time::Duration};
@@ -41,6 +42,10 @@ struct Args {
     /// Emit statistics as JSON (requires --stats)
     #[arg(long)]
     json: bool,
+
+    /// Write the final selected directory to this file before exit.
+    #[arg(long)]
+    export_target: Option<PathBuf>,
 }
 
 // --------------------------------------------------------------------------
@@ -49,7 +54,7 @@ struct Args {
 
 /// Configure the terminal for raw TUI mode, run the event loop, then
 /// unconditionally restore the terminal before returning to the caller.
-fn run_tui(root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn run_tui(root: PathBuf) -> Result<PathBuf, Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -78,7 +83,7 @@ fn run_tui(root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     root: PathBuf,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let mut state = app::AppState::new(root);
 
     loop {
@@ -120,7 +125,7 @@ fn event_loop(
         }
     }
 
-    Ok(())
+    Ok(state.current_path)
 }
 
 // --------------------------------------------------------------------------
@@ -143,7 +148,16 @@ fn main() {
             }
             Err(e) => eprintln!("[x] Scan error: {e}"),
         }
-    } else if let Err(e) = run_tui(args.path) {
-        eprintln!("[x] TUI error: {e}");
+    } else {
+        match run_tui(args.path) {
+            Ok(final_path) => {
+                if let Some(export_file) = args.export_target {
+                    if let Err(e) = shell::write_export_target(&export_file, &final_path) {
+                        eprintln!("[x] Export target error: {e}");
+                    }
+                }
+            }
+            Err(e) => eprintln!("[x] TUI error: {e}"),
+        }
     }
 }
