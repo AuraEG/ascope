@@ -11,6 +11,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 use jwalk::WalkDir;
 use serde::Serialize;
@@ -28,6 +30,49 @@ pub struct PathStats {
     pub file_count: u64,
     /// Byte size attributed to each direct child directory.
     pub subdirs: HashMap<PathBuf, u64>,
+}
+
+// --------------------------------------------------------------------------
+// [SECTION] Async Progress
+// --------------------------------------------------------------------------
+
+/// Tracks the lifecycle of a background directory scan.
+#[derive(Debug, Clone, Default)]
+pub enum ScanProgress {
+    /// No scan has been started yet.
+    #[default]
+    Idle,
+    /// A scan is in-flight.
+    Scanning,
+    /// The scan has finished (successfully or with an error).
+    Complete,
+}
+
+/// Kick off a background thread that calls [`scan_path`] and writes results
+/// into the supplied shared handles.  Returns immediately; the caller must
+/// poll `progress_out` to know when the data is ready.
+pub fn scan_path_async(
+    root: PathBuf,
+    stats_out: Arc<Mutex<PathStats>>,
+    progress_out: Arc<Mutex<ScanProgress>>,
+) {
+    let builder = thread::Builder::new().name("ascope-scanner".to_string());
+    builder
+        .spawn(move || {
+            *progress_out.lock().unwrap_or_else(|e| e.into_inner()) = ScanProgress::Scanning;
+            match scan_path(&root) {
+                Ok(stats) => {
+                    *stats_out.lock().unwrap_or_else(|e| e.into_inner()) = stats;
+                    *progress_out.lock().unwrap_or_else(|e| e.into_inner()) =
+                        ScanProgress::Complete;
+                }
+                Err(_) => {
+                    *progress_out.lock().unwrap_or_else(|e| e.into_inner()) =
+                        ScanProgress::Complete;
+                }
+            }
+        })
+        .expect("Failed to spawn background scanner thread");
 }
 
 // --------------------------------------------------------------------------
@@ -123,5 +168,31 @@ mod tests {
 
         let stats = scan_path(dir.path()).unwrap();
         assert_eq!(*stats.subdirs.get(&sub).unwrap(), 12);
+    }
+
+    #[test]
+    fn test_async_scan_completes() {
+        let dir = tempdir().unwrap();
+        let mut f = File::create(dir.path().join("a.txt")).unwrap();
+        f.write_all(b"hello").unwrap();
+
+        let stats = Arc::new(Mutex::new(PathStats::default()));
+        let progress = Arc::new(Mutex::new(ScanProgress::default()));
+        scan_path_async(
+            dir.path().to_path_buf(),
+            Arc::clone(&stats),
+            Arc::clone(&progress),
+        );
+
+        // Poll until complete (max 5 seconds).
+        let start = std::time::Instant::now();
+        loop {
+            if matches!(*progress.lock().unwrap(), ScanProgress::Complete) {
+                break;
+            }
+            assert!(start.elapsed().as_secs() < 5, "scan timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(stats.lock().unwrap().file_count, 1);
     }
 }

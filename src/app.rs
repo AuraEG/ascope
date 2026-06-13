@@ -11,10 +11,11 @@
 
 use std::cmp::Reverse;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use jwalk::WalkDir;
 
-use crate::fs::walker::{scan_path, PathStats};
+use crate::fs::walker::{scan_path_async, PathStats, ScanProgress};
 
 // --------------------------------------------------------------------------
 // [SECTION] State
@@ -24,8 +25,10 @@ use crate::fs::walker::{scan_path, PathStats};
 pub struct AppState {
     /// Directory currently displayed in the tree pane.
     pub current_path: PathBuf,
-    /// Aggregated scan results for `current_path`.
-    pub active_stats: PathStats,
+    /// Aggregated scan results for `current_path` (shared with scanner thread).
+    active_stats: Arc<Mutex<PathStats>>,
+    /// Lifecycle of the background scan for `current_path`.
+    scan_progress: Arc<Mutex<ScanProgress>>,
     /// Direct child directories sorted by size descending; drives the list.
     pub items: Vec<(PathBuf, u64)>,
     /// Index of the highlighted row in the currently visible item set.
@@ -34,6 +37,8 @@ pub struct AppState {
     pub search_mode: bool,
     /// Current live substring query used to filter visible rows.
     pub search_query: String,
+    /// Flag indicating if the background scan results have already been applied to `items`.
+    scan_applied: bool,
 }
 
 // --------------------------------------------------------------------------
@@ -41,23 +46,83 @@ pub struct AppState {
 // --------------------------------------------------------------------------
 
 impl AppState {
-    /// Scan `root` and build initial state. Falls back to empty stats if the
-    /// path is unreadable so the TUI can still open without crashing.
+    /// Start an async scan of `root` and return immediately with empty stats.
+    /// The TUI renders right away; `poll_scan()` will populate `items` once
+    /// the background thread finishes.
     pub fn new(root: PathBuf) -> Self {
-        let stats = scan_path(&root).unwrap_or_default();
-        let mut items: Vec<(PathBuf, u64)> = stats.subdirs.clone().into_iter().collect();
-        // Largest directories first so the user immediately spots the disk hogs.
-        items.sort_by_key(|x| Reverse(x.1));
+        let active_stats = Arc::new(Mutex::new(PathStats::default()));
+        let scan_progress = Arc::new(Mutex::new(ScanProgress::default()));
+
+        scan_path_async(
+            root.clone(),
+            Arc::clone(&active_stats),
+            Arc::clone(&scan_progress),
+        );
 
         Self {
             current_path: root,
-            active_stats: stats,
-            items,
+            active_stats,
+            scan_progress,
+            items: Vec::new(),
             selected_index: 0,
             search_mode: false,
             search_query: String::new(),
+            scan_applied: false,
         }
     }
+
+    // ------------------------------------------------------------------
+    // [SECTION] Async Scan Helpers
+    // ------------------------------------------------------------------
+
+    /// Returns `true` while the background scanner thread is still running.
+    pub fn is_scanning(&self) -> bool {
+        matches!(
+            *self.scan_progress.lock().unwrap_or_else(|e| e.into_inner()),
+            ScanProgress::Scanning
+        )
+    }
+
+    /// Returns a spinner label while scanning, or an empty string when done.
+    /// Available as a public API for widgets that need explicit spinner text.
+    pub fn scan_progress_label(&self) -> String {
+        if self.is_scanning() {
+            "⣾ Scanning…".to_string()
+        } else {
+            String::new()
+        }
+    }
+
+    /// Returns the total size of the current scanned directory tree.
+    pub fn total_size(&self) -> u64 {
+        self.active_stats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .total_size
+    }
+
+    /// Called every render frame. If the scan has just completed, rebuild
+    /// `items` from the freshly populated stats so the tree pane updates.
+    pub fn poll_scan(&mut self) {
+        if !self.scan_applied
+            && matches!(
+                *self.scan_progress.lock().unwrap_or_else(|e| e.into_inner()),
+                ScanProgress::Complete
+            )
+        {
+            let stats = self.active_stats.lock().unwrap_or_else(|e| e.into_inner());
+            let mut new_items: Vec<(PathBuf, u64)> = stats.subdirs.clone().into_iter().collect();
+            // Largest directories first so the user immediately spots disk hogs.
+            new_items.sort_by_key(|x| Reverse(x.1));
+            drop(stats);
+            self.items = new_items;
+            self.scan_applied = true;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // [SECTION] Navigation & Selection
+    // ------------------------------------------------------------------
 
     /// Return the currently visible items, filtered when search is active.
     pub fn visible_items(&self) -> Vec<(PathBuf, u64)> {
@@ -179,6 +244,28 @@ mod tests {
     use std::io::Write;
     use tempfile::tempdir;
 
+    /// Wait for a newly-created `AppState` to finish its background scan so
+    /// that tests can make assertions on `items`.
+    fn wait_for_scan(state: &mut AppState) {
+        let start = std::time::Instant::now();
+        loop {
+            state.poll_scan();
+            if matches!(
+                *state
+                    .scan_progress
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+                ScanProgress::Complete
+            ) {
+                break;
+            }
+            assert!(start.elapsed().as_secs() < 5, "scan timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // One final poll to make sure items are populated after completion.
+        state.poll_scan();
+    }
+
     /// Build a temp dir with three named sub-dirs, each containing one file.
     fn make_state_with_subdirs() -> (AppState, tempfile::TempDir) {
         let dir = tempdir().unwrap();
@@ -188,7 +275,8 @@ mod tests {
             let mut f = File::create(sub.join("data.bin")).unwrap();
             f.write_all(b"payload").unwrap();
         }
-        let state = AppState::new(dir.path().to_path_buf());
+        let mut state = AppState::new(dir.path().to_path_buf());
+        wait_for_scan(&mut state);
         (state, dir)
     }
 
@@ -281,5 +369,48 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].0, file_path);
+    }
+
+    #[test]
+    fn test_is_scanning_and_poll_scan() {
+        let dir = tempdir().unwrap();
+        let mut f = File::create(dir.path().join("x.txt")).unwrap();
+        f.write_all(b"data").unwrap();
+
+        let mut state = AppState::new(dir.path().to_path_buf());
+        // The scan starts asynchronously. We don't assert the transient Scanning
+        // state because it may already be Complete before this thread is scheduled.
+        // We only assert the deterministic post-wait outcome.
+        wait_for_scan(&mut state);
+        assert!(!state.is_scanning(), "scan must not be Scanning after wait");
+        assert!(
+            matches!(
+                *state
+                    .scan_progress
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+                ScanProgress::Complete
+            ),
+            "scan must be Complete after wait_for_scan"
+        );
+    }
+
+    #[test]
+    fn test_poll_scan_files_only() {
+        let dir = tempdir().unwrap();
+        // Create only a file, no subdirectories
+        let mut f = File::create(dir.path().join("only_file.txt")).unwrap();
+        f.write_all(b"data").unwrap();
+
+        let mut state = AppState::new(dir.path().to_path_buf());
+        wait_for_scan(&mut state);
+
+        // Should be complete, and scan_applied should be true
+        assert!(!state.is_scanning());
+        assert!(state.items.is_empty());
+        assert!(state.scan_applied);
+
+        // Subsequent polls should be no-ops and not lock indefinitely
+        state.poll_scan();
     }
 }

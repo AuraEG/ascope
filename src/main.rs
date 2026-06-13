@@ -87,6 +87,8 @@ fn event_loop(
     let mut state = app::AppState::new(root);
 
     loop {
+        // Check if the background scan has completed and rebuild items if so.
+        state.poll_scan();
         terminal.draw(|f| ui::widgets::render_dashboard(f, &state))?;
 
         // Short timeout keeps the loop responsive without burning CPU.
