@@ -12,6 +12,8 @@
 use std::cmp::Reverse;
 use std::path::PathBuf;
 
+use jwalk::WalkDir;
+
 use crate::fs::walker::{scan_path, PathStats};
 
 // --------------------------------------------------------------------------
@@ -66,15 +68,22 @@ impl AppState {
         }
     }
 
-    /// Descend into the currently selected sub-directory and rescan.
-    pub fn navigate_in(&mut self) {
+    /// Return the currently selected visible entry, if any.
+    pub fn selected_item(&self) -> Option<(PathBuf, u64)> {
         let visible = self.visible_items();
         if visible.is_empty() {
-            return;
+            return None;
         }
-        let target = visible[self.selected_index].0.clone();
-        if target.is_dir() {
-            *self = Self::new(target);
+        let index = self.selected_index.min(visible.len() - 1);
+        visible.get(index).cloned()
+    }
+
+    /// Descend into the currently selected sub-directory and rescan.
+    pub fn navigate_in(&mut self) {
+        if let Some((target, _)) = self.selected_item() {
+            if target.is_dir() {
+                *self = Self::new(target);
+            }
         }
     }
 
@@ -122,14 +131,40 @@ impl AppState {
         self.selected_index = 0;
     }
 
-    /// Case-insensitive substring match over rendered path strings.
+    /// Case-insensitive substring match over files and directories inside the
+    /// active path. Search is recursive so file previews can be opened from the
+    /// live overlay without navigating into every intermediate directory.
     pub fn filter_query(&self, query: &str) -> Vec<(PathBuf, u64)> {
         let q = query.to_lowercase();
-        self.items
-            .iter()
-            .filter(|(path, _)| path.to_string_lossy().to_lowercase().contains(&q))
-            .cloned()
-            .collect()
+        let mut matches = Vec::new();
+
+        for entry in WalkDir::new(&self.current_path)
+            .skip_hidden(true)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            let path = entry.path();
+            if path == self.current_path {
+                continue;
+            }
+
+            if path.to_string_lossy().to_lowercase().contains(&q) {
+                let size = entry
+                    .metadata()
+                    .map(|metadata| {
+                        if metadata.is_file() {
+                            metadata.len()
+                        } else {
+                            0
+                        }
+                    })
+                    .unwrap_or(0);
+                matches.push((path.to_path_buf(), size));
+            }
+        }
+
+        matches.sort_by(|a, b| a.0.cmp(&b.0));
+        matches
     }
 }
 
@@ -199,7 +234,7 @@ mod tests {
 
         let filtered = state.filter_query("main");
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].0, PathBuf::from("src/main.rs"));
+        assert!(filtered[0].0.ends_with(PathBuf::from("src/main.rs")));
     }
 
     #[test]
@@ -214,7 +249,7 @@ mod tests {
 
         let visible = state.visible_items();
         assert_eq!(visible.len(), 1);
-        assert_eq!(visible[0].0, PathBuf::from("src/app.rs"));
+        assert!(visible[0].0.ends_with(PathBuf::from("src/app.rs")));
     }
 
     #[test]
@@ -230,5 +265,21 @@ mod tests {
         state.pop_search_char();
         assert_eq!(state.selected_index, 0);
         assert!(state.search_query.is_empty());
+    }
+
+    #[test]
+    fn test_filter_query_matches_nested_files() {
+        let dir = tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir(&src_dir).unwrap();
+        let file_path = src_dir.join("main.rs");
+        let mut file = File::create(&file_path).unwrap();
+        file.write_all(b"fn main() {}\n").unwrap();
+
+        let state = AppState::new(dir.path().to_path_buf());
+        let filtered = state.filter_query("main.rs");
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0, file_path);
     }
 }
