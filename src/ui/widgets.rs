@@ -11,7 +11,7 @@
 
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, List, ListItem},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
 
 use crate::app::AppState;
@@ -26,13 +26,25 @@ use crate::app::AppState;
 /// tree with the active selection highlighted; the right pane shows a bar for
 /// each entry proportional to its share of the total scanned size.
 pub fn render_dashboard(f: &mut Frame, state: &AppState) {
+    let frame = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(if state.search_mode { 3 } else { 0 }),
+        ])
+        .split(f.size());
+
     let panes = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(f.size());
+        .split(frame[0]);
 
     render_tree(f, state, panes[0]);
     render_size_bars(f, state, panes[1]);
+
+    if state.search_mode {
+        render_search_overlay(f, state, frame[1]);
+    }
 }
 
 // --------------------------------------------------------------------------
@@ -40,8 +52,8 @@ pub fn render_dashboard(f: &mut Frame, state: &AppState) {
 // --------------------------------------------------------------------------
 
 fn render_tree(f: &mut Frame, state: &AppState, area: Rect) {
-    let items: Vec<ListItem> = state
-        .items
+    let visible = state.visible_items();
+    let items: Vec<ListItem> = visible
         .iter()
         .enumerate()
         .map(|(idx, (path, size))| {
@@ -76,11 +88,11 @@ fn render_tree(f: &mut Frame, state: &AppState, area: Rect) {
 // --------------------------------------------------------------------------
 
 fn render_size_bars(f: &mut Frame, state: &AppState, area: Rect) {
+    let visible = state.visible_items();
     // The largest entry anchors the scale so all bars are relative to it.
-    let max_size = state.items.first().map(|x| x.1).unwrap_or(1);
+    let max_size = visible.first().map(|x| x.1).unwrap_or(1);
 
-    let items: Vec<ListItem> = state
-        .items
+    let items: Vec<ListItem> = visible
         .iter()
         .map(|(_, size)| {
             #[allow(clippy::cast_precision_loss)]
@@ -96,4 +108,19 @@ fn render_size_bars(f: &mut Frame, state: &AppState, area: Rect) {
         .borders(Borders::ALL);
 
     f.render_widget(List::new(items).block(block), area);
+}
+
+// --------------------------------------------------------------------------
+// [SECTION] Bottom Overlay -- Search Input
+// --------------------------------------------------------------------------
+
+fn render_search_overlay(f: &mut Frame, state: &AppState, area: Rect) {
+    let block = Block::default()
+        .title(" Search ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let prompt = Paragraph::new(format!("Search: {}", state.search_query)).block(block);
+    f.render_widget(Clear, area);
+    f.render_widget(prompt, area);
 }

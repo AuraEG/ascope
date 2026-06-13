@@ -87,13 +87,32 @@ fn event_loop(
         // Short timeout keeps the loop responsive without burning CPU.
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
+                if state.search_mode {
+                    match key.code {
+                        KeyCode::Esc => state.toggle_search_mode(),
+                        KeyCode::Enter => state.toggle_search_mode(),
+                        KeyCode::Backspace => state.pop_search_char(),
+                        KeyCode::Char('/') if state.search_query.is_empty() => {
+                            state.toggle_search_mode();
+                        }
+                        KeyCode::Char(c) => state.push_search_char(c),
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Char('/') => state.toggle_search_mode(),
                     KeyCode::Down | KeyCode::Char('j') => state.move_selection(1),
                     KeyCode::Up | KeyCode::Char('k') => state.move_selection(-1),
                     KeyCode::Enter => state.navigate_in(),
                     KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
-                        state.navigate_out();
+                        if state.search_query.is_empty() {
+                            state.navigate_out();
+                        } else {
+                            state.clear_search();
+                        }
                     }
                     _ => {}
                 }
