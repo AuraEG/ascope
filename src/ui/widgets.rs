@@ -9,9 +9,16 @@
 // Created : 2026-06-13
 // ==========================================================================
 
+use std::path::Path;
+
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+};
+use syntect::{
+    easy::HighlightLines,
+    highlighting::{Style as SyntectStyle, ThemeSet},
+    parsing::SyntaxSet,
 };
 
 use crate::app::AppState;
@@ -40,7 +47,7 @@ pub fn render_dashboard(f: &mut Frame, state: &AppState) {
         .split(frame[0]);
 
     render_tree(f, state, panes[0]);
-    render_size_bars(f, state, panes[1]);
+    render_right_pane(f, state, panes[1]);
 
     if state.search_mode {
         render_search_overlay(f, state, frame[1]);
@@ -84,8 +91,19 @@ fn render_tree(f: &mut Frame, state: &AppState, area: Rect) {
 }
 
 // --------------------------------------------------------------------------
-// [SECTION] Right Pane -- Size Distribution Bars
+// [SECTION] Right Pane -- Size Bars or Preview
 // --------------------------------------------------------------------------
+
+fn render_right_pane(f: &mut Frame, state: &AppState, area: Rect) {
+    if let Some((path, _)) = state.selected_item() {
+        if path.is_file() {
+            render_file_preview(f, &path, area);
+            return;
+        }
+    }
+
+    render_size_bars(f, state, area);
+}
 
 fn render_size_bars(f: &mut Frame, state: &AppState, area: Rect) {
     let visible = state.visible_items();
@@ -110,6 +128,86 @@ fn render_size_bars(f: &mut Frame, state: &AppState, area: Rect) {
     f.render_widget(List::new(items).block(block), area);
 }
 
+fn render_file_preview(f: &mut Frame, path: &Path, area: Rect) {
+    let title = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let block = Block::default()
+        .title(format!(" Preview: {title} "))
+        .borders(Borders::ALL);
+
+    let lines = build_preview_lines(path);
+    let preview = Paragraph::new(Text::from(lines))
+        .block(block)
+        .wrap(Wrap { trim: false });
+    f.render_widget(preview, area);
+}
+
+fn build_preview_lines(path: &Path) -> Vec<Line<'static>> {
+    match load_preview_source(path) {
+        Ok(source) => highlight_preview_source(path, &source),
+        Err(error) => vec![Line::from(format!("[x] Preview error: {error}"))],
+    }
+}
+
+fn load_preview_source(path: &Path) -> std::io::Result<String> {
+    let source = std::fs::read_to_string(path)?;
+    Ok(source.lines().take(100).collect::<Vec<_>>().join("\n"))
+}
+
+fn highlight_preview_source(path: &Path, source: &str) -> Vec<Line<'static>> {
+    let syntax_set = SyntaxSet::load_defaults_newlines();
+    let theme_set = ThemeSet::load_defaults();
+    let syntax = syntax_set
+        .find_syntax_for_file(path)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
+    let theme = theme_set
+        .themes
+        .get("base16-ocean.dark")
+        .unwrap_or_else(|| theme_set.themes.values().next().expect("default theme"));
+    let mut highlighter = HighlightLines::new(syntax, theme);
+    let mut lines = Vec::new();
+
+    for line in source.lines() {
+        let mut input = line.to_string();
+        input.push('\n');
+        match highlighter.highlight_line(&input, &syntax_set) {
+            Ok(ranges) => {
+                let spans = ranges
+                    .into_iter()
+                    .map(|(style, text)| Span::styled(text.to_string(), to_ratatui_style(style)))
+                    .collect::<Vec<_>>();
+                lines.push(Line::from(spans));
+            }
+            Err(_) => lines.push(Line::from(line.to_string())),
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from("[i] Empty file"));
+    }
+
+    lines
+}
+
+fn to_ratatui_style(style: SyntectStyle) -> Style {
+    Style::default()
+        .fg(Color::Rgb(
+            style.foreground.r,
+            style.foreground.g,
+            style.foreground.b,
+        ))
+        .bg(Color::Rgb(
+            style.background.r,
+            style.background.g,
+            style.background.b,
+        ))
+}
+
 // --------------------------------------------------------------------------
 // [SECTION] Bottom Overlay -- Search Input
 // --------------------------------------------------------------------------
@@ -123,4 +221,27 @@ fn render_search_overlay(f: &mut Frame, state: &AppState, area: Rect) {
     let prompt = Paragraph::new(format!("Search: {}", state.search_query)).block(block);
     f.render_widget(Clear, area);
     f.render_widget(prompt, area);
+}
+
+// --------------------------------------------------------------------------
+// [SECTION] Tests
+// --------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_load_preview_source_reads_file_contents() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("sample.rs");
+        let mut file = File::create(&file_path).unwrap();
+        file.write_all(b"fn main() {}\n").unwrap();
+
+        let preview = load_preview_source(&file_path).unwrap();
+        assert!(preview.contains("fn main() {}"));
+    }
 }
