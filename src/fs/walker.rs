@@ -20,7 +20,7 @@ use serde::Serialize;
 // --------------------------------------------------------------------------
 
 /// Aggregated size statistics for a scanned directory tree.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct PathStats {
     /// Total byte size of all files under the root.
     pub total_size: u64,
