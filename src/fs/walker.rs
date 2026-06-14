@@ -21,6 +21,23 @@ use serde::Serialize;
 // [SECTION] Public Types
 // --------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum EntryType {
+    File,
+    Directory,
+    Symlink,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DirEntry {
+    pub path: PathBuf,
+    pub size: u64,
+    pub entry_type: EntryType,
+    pub mtime: std::time::SystemTime,
+    pub display_path: String,
+    pub symlink_target: Option<PathBuf>,
+}
+
 /// Aggregated size statistics for a scanned directory tree.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PathStats {
@@ -30,6 +47,8 @@ pub struct PathStats {
     pub file_count: u64,
     /// Byte size attributed to each direct child directory.
     pub subdirs: HashMap<PathBuf, u64>,
+    /// All entries scanned recursively under the root path.
+    pub all_entries: Vec<DirEntry>,
 }
 
 // --------------------------------------------------------------------------
@@ -85,37 +104,103 @@ pub fn scan_path(root: &Path) -> Result<PathStats, std::io::Error> {
     let mut total_size: u64 = 0;
     let mut file_count: u64 = 0;
     let mut subdirs: HashMap<PathBuf, u64> = HashMap::new();
+    let mut all_entries: Vec<DirEntry> = Vec::new();
+
+    let mut temp_entries = Vec::new();
+    let mut dir_sizes: HashMap<PathBuf, u64> = HashMap::new();
 
     for entry in WalkDir::new(root)
         .skip_hidden(true)
         .into_iter()
         .filter_map(Result::ok)
     {
-        // Only account for regular files; directories carry no payload size.
-        if entry.file_type().is_file() {
-            if let Ok(metadata) = entry.metadata() {
-                let size = metadata.len();
-                total_size += size;
-                file_count += 1;
+        let path = entry.path();
+        if path == root {
+            continue;
+        }
 
-                // Attribute this file's size to its direct child subdirectory
-                // so callers can rank top-level folders by disk usage.
-                if let Ok(relative) = entry.path().strip_prefix(root) {
-                    if let Some(first) = relative.components().next() {
-                        let child = root.join(first.as_os_str());
-                        if child.is_dir() {
-                            *subdirs.entry(child).or_insert(0) += size;
-                        }
-                    }
+        let file_type = entry.file_type();
+        let entry_type = if file_type.is_symlink() {
+            EntryType::Symlink
+        } else if file_type.is_dir() {
+            EntryType::Directory
+        } else {
+            EntryType::File
+        };
+
+        let size = if entry_type == EntryType::File {
+            entry.metadata().map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
+
+        let metadata = std::fs::symlink_metadata(&path);
+        let mtime = metadata
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+
+        let symlink_target = if entry_type == EntryType::Symlink {
+            std::fs::read_link(&path).ok()
+        } else {
+            None
+        };
+
+        if entry_type == EntryType::File {
+            total_size += size;
+            file_count += 1;
+
+            // Add size to all ancestor directories up to `root`
+            let mut parent = path.parent();
+            while let Some(p) = parent {
+                if !p.starts_with(root) || p == root {
+                    break;
                 }
+                *dir_sizes.entry(p.to_path_buf()).or_insert(0) += size;
+                parent = p.parent();
             }
         }
+
+        temp_entries.push((path.to_path_buf(), entry_type, size, mtime, symlink_target));
+    }
+
+    // Populate direct subdirectory sizes for `subdirs`
+    for (path, entry_type, _, _, _) in &temp_entries {
+        if *entry_type == EntryType::Directory && path.parent() == Some(root) {
+            let size = *dir_sizes.get(path).unwrap_or(&0);
+            subdirs.insert(path.clone(), size);
+        }
+    }
+
+    // Populate all_entries with actual sizes and other details
+    for (path, entry_type, size, mtime, symlink_target) in temp_entries {
+        let actual_size = if entry_type == EntryType::Directory {
+            *dir_sizes.get(&path).unwrap_or(&0)
+        } else {
+            size
+        };
+
+        let display_path = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+
+        all_entries.push(DirEntry {
+            path,
+            size: actual_size,
+            entry_type,
+            mtime,
+            display_path,
+            symlink_target,
+        });
     }
 
     Ok(PathStats {
         total_size,
         file_count,
         subdirs,
+        all_entries,
     })
 }
 
@@ -138,11 +223,15 @@ mod tests {
         std::fs::create_dir(&sub_dir).unwrap();
         let file_path2 = sub_dir.join("file2.log");
 
-        let mut f1 = File::create(file_path1).unwrap();
-        f1.write_all(b"hello").unwrap(); // 5 bytes
+        {
+            let mut f1 = File::create(file_path1).unwrap();
+            f1.write_all(b"hello").unwrap(); // 5 bytes
+        }
 
-        let mut f2 = File::create(file_path2).unwrap();
-        f2.write_all(b"rust-systems").unwrap(); // 12 bytes
+        {
+            let mut f2 = File::create(file_path2).unwrap();
+            f2.write_all(b"rust-systems").unwrap(); // 12 bytes
+        }
 
         let stats = scan_path(dir.path()).unwrap();
         assert_eq!(stats.total_size, 17);
@@ -163,8 +252,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let sub = dir.path().join("pkg");
         std::fs::create_dir(&sub).unwrap();
-        let mut f = File::create(sub.join("lib.rs")).unwrap();
-        f.write_all(b"fn main() {}").unwrap(); // 12 bytes
+        {
+            let mut f = File::create(sub.join("lib.rs")).unwrap();
+            f.write_all(b"fn main() {}").unwrap(); // 12 bytes
+        }
 
         let stats = scan_path(dir.path()).unwrap();
         assert_eq!(*stats.subdirs.get(&sub).unwrap(), 12);
@@ -194,5 +285,25 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert_eq!(stats.lock().unwrap().file_count, 1);
+    }
+
+    #[test]
+    fn test_recursive_directory_sizes_in_all_entries() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("pkg");
+        let subsub = sub.join("src");
+        std::fs::create_dir_all(&subsub).unwrap();
+        {
+            let mut f = File::create(subsub.join("lib.rs")).unwrap();
+            f.write_all(b"fn main() {}").unwrap(); // 12 bytes
+        }
+
+        let stats = scan_path(dir.path()).unwrap();
+        // In all_entries, both pkg and pkg/src should have size 12
+        let pkg_entry = stats.all_entries.iter().find(|e| e.path == sub).unwrap();
+        assert_eq!(pkg_entry.size, 12);
+
+        let pkg_src_entry = stats.all_entries.iter().find(|e| e.path == subsub).unwrap();
+        assert_eq!(pkg_src_entry.size, 12);
     }
 }
