@@ -38,7 +38,8 @@ static THEME_SET: Lazy<ThemeSet> = Lazy::new(ThemeSet::load_defaults);
 /// tree with the active selection highlighted; the right pane shows a bar for
 /// each entry proportional to its share of the total scanned size.
 pub fn render_dashboard(f: &mut Frame, state: &AppState) {
-    let layout = crate::ui::layout::build_layout(f.size(), true, state.search_mode);
+    let layout =
+        crate::ui::layout::build_layout(f.size(), true, state.search_mode || state.rename_mode);
 
     if layout.tab_bar.height > 0 {
         render_tab_bar(f, state, layout.tab_bar);
@@ -54,6 +55,8 @@ pub fn render_dashboard(f: &mut Frame, state: &AppState) {
 
     if state.search_mode {
         render_search_overlay(f, state, layout.search_bar);
+    } else if state.rename_mode {
+        render_rename_overlay(f, state, layout.search_bar);
     }
 
     if layout.status_bar.height > 0 {
@@ -110,6 +113,11 @@ fn render_modal(f: &mut Frame, state: &AppState) {
         return;
     }
 
+    if state.modal_mode == crate::app::ModalMode::DeleteConfirmation {
+        render_delete_confirmation(f, state);
+        return;
+    }
+
     let area = centered_rect(70, 60, f.size());
     let screen = f.size();
 
@@ -129,7 +137,7 @@ fn render_modal(f: &mut Frame, state: &AppState) {
     let title_text = match state.modal_mode {
         crate::app::ModalMode::Bookmarks => " Bookmarks persistence ",
         crate::app::ModalMode::Recent => " Recently Visited Directories ",
-        crate::app::ModalMode::None | crate::app::ModalMode::OpenConfirmation => "",
+        _ => "",
     };
     let title_line = Line::from(vec![
         Span::styled(" 󰉋 ", Style::default().fg(Color::Rgb(150, 100, 220)).bold()),
@@ -192,9 +200,7 @@ fn render_modal(f: &mut Frame, state: &AppState) {
                 ),
                 Span::styled("direct jump ", Style::default().fg(Color::Gray)),
             ]),
-            crate::app::ModalMode::None | crate::app::ModalMode::OpenConfirmation => {
-                Line::default()
-            }
+            _ => Line::default(),
         }
     };
 
@@ -210,7 +216,7 @@ fn render_modal(f: &mut Frame, state: &AppState) {
     let is_empty = match state.modal_mode {
         crate::app::ModalMode::Bookmarks => state.config.bookmarks.is_empty(),
         crate::app::ModalMode::Recent => state.config.recent.is_empty(),
-        crate::app::ModalMode::None | crate::app::ModalMode::OpenConfirmation => true,
+        _ => true,
     };
 
     if is_empty {
@@ -221,7 +227,7 @@ fn render_modal(f: &mut Frame, state: &AppState) {
             crate::app::ModalMode::Recent => {
                 "\n\n\n  No recently visited directories."
             }
-            crate::app::ModalMode::None | crate::app::ModalMode::OpenConfirmation => "",
+            _ => "",
         };
         let paragraph = Paragraph::new(msg)
             .block(block)
@@ -354,7 +360,7 @@ fn render_modal(f: &mut Frame, state: &AppState) {
                 ListItem::new(Line::from(spans)).style(item_style)
             })
             .collect(),
-        crate::app::ModalMode::None | crate::app::ModalMode::OpenConfirmation => Vec::new(),
+        _ => Vec::new(),
     };
 
     f.render_widget(Clear, area);
@@ -421,7 +427,18 @@ fn render_tree(f: &mut Frame, state: &AppState, area: Rect) {
             #[allow(clippy::cast_precision_loss)]
             let size_mb = size as f64 / 1_000_000.0;
 
+            let is_yanked = state.yanked_files.contains(path);
+            let is_cut = state.cut_files.contains(path);
+            let is_selected_for_batch = state.selected_paths.contains(path);
+
             let mut spans = Vec::new();
+
+            // Render batch selection marker
+            if is_selected_for_batch {
+                spans.push(Span::styled("● ", Style::default().fg(Color::Green)));
+            } else {
+                spans.push(Span::raw("  "));
+            }
 
             // Render score badge if search is active
             if !state.search_query.is_empty() && *score > 0 {
@@ -479,6 +496,18 @@ fn render_tree(f: &mut Frame, state: &AppState, area: Rect) {
 
             spans.push(Span::raw(format!("{name} ({size_mb:.2} MB)")));
 
+            if is_yanked {
+                spans.push(Span::styled(
+                    " [YANK]",
+                    Style::default().fg(Color::Rgb(240, 200, 50)).bold(),
+                ));
+            } else if is_cut {
+                spans.push(Span::styled(
+                    " [CUT]",
+                    Style::default().fg(Color::Rgb(128, 128, 128)).bold(),
+                ));
+            }
+
             let mtime_str = format_system_time(mtime);
             spans.push(Span::styled(
                 format!(" [{}]", mtime_str),
@@ -487,6 +516,10 @@ fn render_tree(f: &mut Frame, state: &AppState, area: Rect) {
 
             let item_style = if actual_idx == state.selected_index {
                 Style::default().fg(Color::Cyan).bg(Color::DarkGray)
+            } else if is_yanked {
+                Style::default().fg(Color::Rgb(240, 200, 50)) // Gold/yellow
+            } else if is_cut {
+                Style::default().fg(Color::Rgb(128, 128, 128)) // Dimmed gray
             } else {
                 Style::default().fg(Color::White)
             };
@@ -1089,6 +1122,105 @@ fn render_open_confirmation(f: &mut Frame, state: &AppState) {
 
     f.render_widget(Clear, area);
     f.render_widget(Paragraph::new(content).block(block), area);
+}
+
+fn render_delete_confirmation(f: &mut Frame, state: &AppState) {
+    let count = state.delete_targets.len();
+    let prompt_label = Line::from(vec![Span::styled(
+        " Are you sure you want to permanently delete: ",
+        Style::default().fg(Color::Gray),
+    )]);
+
+    let target_label = if count == 1 {
+        let path_str = state.delete_targets[0].to_string_lossy().to_string();
+        let display_path = if path_str.len() > 42 {
+            format!("...{}", &path_str[path_str.len() - 39..])
+        } else {
+            path_str
+        };
+        Line::from(vec![
+            Span::raw("    "),
+            Span::styled(display_path, Style::default().fg(Color::LightRed).bold()),
+        ])
+    } else {
+        Line::from(vec![
+            Span::raw("    "),
+            Span::styled(
+                format!("{} selected items", count),
+                Style::default().fg(Color::LightRed).bold(),
+            ),
+        ])
+    };
+
+    let warning_label = Line::from(vec![
+        Span::raw("    "),
+        Span::styled(
+            "󰆴 This action cannot be undone!",
+            Style::default().fg(Color::Rgb(220, 50, 50)).bold(),
+        ),
+    ]);
+
+    let content = vec![
+        Line::default(),
+        prompt_label,
+        Line::default(),
+        target_label,
+        Line::default(),
+        warning_label,
+    ];
+
+    let footer_line = Line::from(vec![
+        Span::styled(" [y/Enter] ", Style::default().fg(Color::Red).bold()),
+        Span::styled("confirm deletion │ ", Style::default().fg(Color::Gray)),
+        Span::styled(" [n/Esc] ", Style::default().fg(Color::Cyan).bold()),
+        Span::styled("cancel ", Style::default().fg(Color::Gray)),
+    ]);
+
+    let block = Block::default()
+        .title(Line::from(vec![
+            Span::styled(" 󰆴 ", Style::default().fg(Color::Red).bold()),
+            Span::styled(
+                " Delete Confirmation ",
+                Style::default().fg(Color::LightRed).bold(),
+            ),
+            Span::styled(" ", Style::default()),
+        ]))
+        .title_alignment(Alignment::Center)
+        .title_bottom(footer_line)
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red))
+        .style(Style::default().bg(Color::Rgb(25, 20, 20)));
+
+    let area = centered_rect_fixed(50, 9, f.size());
+    let screen = f.size();
+    if area.width > 1 && area.height > 1 {
+        let shadow_area = Rect {
+            x: (area.x + 1).min(screen.width.saturating_sub(1)),
+            y: (area.y + 1).min(screen.height.saturating_sub(1)),
+            width: area.width.min(screen.width.saturating_sub(area.x + 1)),
+            height: area.height.min(screen.height.saturating_sub(area.y + 1)),
+        };
+        let shadow_block = Block::default().style(Style::default().bg(Color::Rgb(12, 8, 8)));
+        f.render_widget(shadow_block, shadow_area);
+    }
+
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(content).block(block), area);
+}
+
+fn render_rename_overlay(f: &mut Frame, state: &AppState, area: Rect) {
+    let block = Block::default()
+        .title(" Rename ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let prompt = Paragraph::new(format!("Rename to: {}", state.rename_input)).block(block);
+    f.render_widget(Clear, area);
+    f.render_widget(prompt, area);
+
+    // Show blinking cursor at input
+    f.set_cursor(area.x + 12 + state.rename_input.len() as u16, area.y + 1);
 }
 
 fn get_notification_area(screen: Rect, width: u16, height: u16) -> Rect {

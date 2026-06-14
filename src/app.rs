@@ -38,6 +38,7 @@ pub enum ModalMode {
     Bookmarks,
     Recent,
     OpenConfirmation,
+    DeleteConfirmation,
 }
 
 use crate::fs::walker::{DirEntry, EntryType};
@@ -116,6 +117,20 @@ pub struct AppState {
     pub modal_confirm_prev: ModalMode,
     /// Whether to open confirmation target path in a new tab
     pub modal_confirm_new_tab: bool,
+    /// Selected paths for multi-file operations
+    pub selected_paths: std::collections::HashSet<PathBuf>,
+    /// Yanked paths for pasting
+    pub yanked_files: Vec<PathBuf>,
+    /// Cut paths for pasting
+    pub cut_files: Vec<PathBuf>,
+    /// Target path for renaming
+    pub rename_target: Option<PathBuf>,
+    /// Text input buffer for renaming
+    pub rename_input: String,
+    /// Whether inline rename mode is active
+    pub rename_mode: bool,
+    /// Target paths for deletion confirmation
+    pub delete_targets: Vec<PathBuf>,
 }
 
 // --------------------------------------------------------------------------
@@ -191,6 +206,13 @@ impl AppState {
             modal_target_path: None,
             modal_confirm_prev: ModalMode::None,
             modal_confirm_new_tab: false,
+            selected_paths: std::collections::HashSet::new(),
+            yanked_files: Vec::new(),
+            cut_files: Vec::new(),
+            rename_target: None,
+            rename_input: String::new(),
+            rename_mode: false,
+            delete_targets: Vec::new(),
         }
     }
 
@@ -237,10 +259,7 @@ impl AppState {
             let new_items: Vec<DirEntry> = stats
                 .all_entries
                 .iter()
-                .filter(|entry| {
-                    entry.entry_type == EntryType::Directory
-                        && entry.path.parent() == Some(&self.current_path)
-                })
+                .filter(|entry| entry.path.parent() == Some(&self.current_path))
                 .cloned()
                 .collect();
             self.all_entries = stats.all_entries.clone();
@@ -700,6 +719,349 @@ impl AppState {
         self.save_active_tab();
     }
 
+    // Helper to copy text to system clipboard.
+    fn copy_to_clipboard(&mut self, text: &str) {
+        match arboard::Clipboard::new() {
+            Ok(mut cb) => {
+                if let Err(e) = cb.set_text(text.to_string()) {
+                    self.notification =
+                        Some((format!("Clipboard error: {}", e), std::time::Instant::now()));
+                }
+            }
+            Err(e) => {
+                self.notification =
+                    Some((format!("Clipboard error: {}", e), std::time::Instant::now()));
+            }
+        }
+    }
+
+    /// Yank full path of the selected file(s) to system clipboard.
+    pub fn yank_full_path(&mut self) {
+        let targets = if !self.selected_paths.is_empty() {
+            self.selected_paths.iter().cloned().collect::<Vec<_>>()
+        } else if let Some(item) = self.selected_item() {
+            vec![item.path]
+        } else {
+            Vec::new()
+        };
+
+        if targets.is_empty() {
+            return;
+        }
+
+        let paths_str = targets
+            .iter()
+            .map(|p| p.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.copy_to_clipboard(&paths_str);
+
+        self.yanked_files = targets.clone();
+        self.cut_files.clear();
+
+        let count = targets.len();
+        let name = if count == 1 {
+            targets[0]
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        } else {
+            format!("{} items", count)
+        };
+        self.notification = Some((format!("Yanked: {}", name), std::time::Instant::now()));
+        self.selected_paths.clear();
+    }
+
+    /// Yank filename of the selected file(s) to system clipboard.
+    pub fn yank_filename(&mut self) {
+        let targets = if !self.selected_paths.is_empty() {
+            self.selected_paths.iter().cloned().collect::<Vec<_>>()
+        } else if let Some(item) = self.selected_item() {
+            vec![item.path]
+        } else {
+            Vec::new()
+        };
+
+        if targets.is_empty() {
+            return;
+        }
+
+        let filenames = targets
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy())
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.copy_to_clipboard(&filenames);
+
+        let count = targets.len();
+        self.notification = Some((
+            format!("Yanked filename(s) of {} items", count),
+            std::time::Instant::now(),
+        ));
+        self.selected_paths.clear();
+    }
+
+    /// Cut selected file(s) for moving later.
+    pub fn cut_file(&mut self) {
+        let targets = if !self.selected_paths.is_empty() {
+            self.selected_paths.iter().cloned().collect::<Vec<_>>()
+        } else if let Some(item) = self.selected_item() {
+            vec![item.path]
+        } else {
+            Vec::new()
+        };
+
+        if targets.is_empty() {
+            return;
+        }
+
+        self.cut_files = targets.clone();
+        self.yanked_files.clear();
+
+        let count = targets.len();
+        let name = if count == 1 {
+            targets[0]
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        } else {
+            format!("{} items", count)
+        };
+        self.notification = Some((format!("Cut: {}", name), std::time::Instant::now()));
+        self.selected_paths.clear();
+    }
+
+    /// Helper to recursively copy directories.
+    fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let ty = entry.file_type()?;
+            let next_dst = dst.join(entry.file_name());
+            if ty.is_dir() {
+                Self::copy_dir_recursive(&entry.path(), &next_dst)?;
+            } else {
+                std::fs::copy(entry.path(), &next_dst)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Paste yanked or cut files in the current viewing directory.
+    pub fn paste_files(&mut self) {
+        if !self.yanked_files.is_empty() {
+            let mut errors = 0;
+            let mut success = 0;
+            for path in &self.yanked_files {
+                if let Some(filename) = path.file_name() {
+                    let dst = self.current_path.join(filename);
+                    if path.is_dir() {
+                        if Self::copy_dir_recursive(path, &dst).is_ok() {
+                            success += 1;
+                        } else {
+                            errors += 1;
+                        }
+                    } else if std::fs::copy(path, &dst).is_ok() {
+                        success += 1;
+                    } else {
+                        errors += 1;
+                    }
+                }
+            }
+            if errors > 0 {
+                self.notification = Some((
+                    format!("Pasted {} items with {} errors", success, errors),
+                    std::time::Instant::now(),
+                ));
+            } else {
+                self.notification = Some((
+                    format!("Pasted {} items successfully", success),
+                    std::time::Instant::now(),
+                ));
+            }
+            // Trigger refresh
+            self.jump_to_path(self.current_path.clone());
+        } else if !self.cut_files.is_empty() {
+            let mut errors = 0;
+            let mut success = 0;
+            for path in &self.cut_files {
+                if let Some(filename) = path.file_name() {
+                    let dst = self.current_path.join(filename);
+                    if std::fs::rename(path, &dst).is_ok() {
+                        success += 1;
+                    } else {
+                        // Fallback: copy recursively and delete source (e.g. cross-device move)
+                        let copy_res = if path.is_dir() {
+                            Self::copy_dir_recursive(path, &dst)
+                        } else {
+                            std::fs::copy(path, &dst).map(|_| ())
+                        };
+                        if copy_res.is_ok() {
+                            let _ = if path.is_dir() {
+                                std::fs::remove_dir_all(path)
+                            } else {
+                                std::fs::remove_file(path)
+                            };
+                            success += 1;
+                        } else {
+                            errors += 1;
+                        }
+                    }
+                }
+            }
+            self.cut_files.clear();
+            if errors > 0 {
+                self.notification = Some((
+                    format!("Moved {} items with {} errors", success, errors),
+                    std::time::Instant::now(),
+                ));
+            } else {
+                self.notification = Some((
+                    format!("Moved {} items successfully", success),
+                    std::time::Instant::now(),
+                ));
+            }
+            // Trigger refresh
+            self.jump_to_path(self.current_path.clone());
+        }
+    }
+
+    /// Open selected file in the system default application.
+    pub fn open_in_system(&mut self) {
+        if let Some(item) = self.selected_item() {
+            if item.entry_type == EntryType::File {
+                match open::that(&item.path) {
+                    Ok(_) => {
+                        self.notification = Some((
+                            format!(
+                                "Opened: {}",
+                                item.path.file_name().unwrap().to_string_lossy()
+                            ),
+                            std::time::Instant::now(),
+                        ));
+                    }
+                    Err(e) => {
+                        self.notification =
+                            Some((format!("Open error: {}", e), std::time::Instant::now()));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Request file deletion (sets up target paths and opens DeleteConfirmation modal).
+    pub fn request_delete(&mut self) {
+        let targets = if !self.selected_paths.is_empty() {
+            self.selected_paths.iter().cloned().collect::<Vec<_>>()
+        } else if let Some(item) = self.selected_item() {
+            vec![item.path]
+        } else {
+            Vec::new()
+        };
+
+        if targets.is_empty() {
+            return;
+        }
+
+        self.delete_targets = targets;
+        self.modal_mode = ModalMode::DeleteConfirmation;
+    }
+
+    /// Confirm and execute file deletion.
+    pub fn confirm_delete(&mut self) {
+        let mut success = 0;
+        let mut errors = 0;
+
+        for path in &self.delete_targets {
+            let res = if path.is_dir() {
+                std::fs::remove_dir_all(path)
+            } else {
+                std::fs::remove_file(path)
+            };
+
+            if res.is_ok() {
+                success += 1;
+            } else {
+                errors += 1;
+            }
+        }
+
+        let count = self.delete_targets.len();
+        self.delete_targets.clear();
+        self.selected_paths.clear();
+        self.modal_mode = ModalMode::None;
+
+        if errors > 0 {
+            self.notification = Some((
+                format!("Deleted {}/{} items ({} errors)", success, count, errors),
+                std::time::Instant::now(),
+            ));
+        } else {
+            self.notification = Some((
+                format!("Deleted {} items successfully", success),
+                std::time::Instant::now(),
+            ));
+        }
+
+        // Refresh view
+        self.jump_to_path(self.current_path.clone());
+    }
+
+    /// Request file rename (initiates rename mode and sets target/buffer).
+    pub fn request_rename(&mut self) {
+        if let Some(item) = self.selected_item() {
+            let filename = item
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.rename_target = Some(item.path);
+            self.rename_input = filename;
+            self.rename_mode = true;
+            self.search_mode = false;
+        }
+    }
+
+    /// Confirm and execute file rename.
+    pub fn confirm_rename(&mut self) {
+        if let Some(target) = self.rename_target.take() {
+            if !self.rename_input.is_empty() {
+                if let Some(parent) = target.parent() {
+                    let dst = parent.join(&self.rename_input);
+                    if std::fs::rename(&target, &dst).is_ok() {
+                        let old_name = target.file_name().unwrap().to_string_lossy();
+                        self.notification = Some((
+                            format!("Renamed {} to {}", old_name, self.rename_input),
+                            std::time::Instant::now(),
+                        ));
+                    } else {
+                        self.notification =
+                            Some(("Rename failed".to_string(), std::time::Instant::now()));
+                    }
+                }
+            }
+        }
+        self.rename_mode = false;
+        self.rename_input.clear();
+        // Refresh view
+        self.jump_to_path(self.current_path.clone());
+    }
+
+    /// Toggle selection status of the currently highlighted entry for batch actions.
+    pub fn toggle_select(&mut self) {
+        if let Some(item) = self.selected_item() {
+            if self.selected_paths.contains(&item.path) {
+                self.selected_paths.remove(&item.path);
+            } else {
+                self.selected_paths.insert(item.path);
+            }
+        }
+    }
+
     /// Move the selection cursor by `delta` rows, wrapping at both ends.
     pub fn move_selection(&mut self, delta: isize) {
         let len = self.visible_items().len();
@@ -1000,7 +1362,7 @@ mod tests {
         wait_for_scan(&mut state);
 
         assert!(!state.is_scanning());
-        assert!(state.items.is_empty());
+        assert_eq!(state.items.len(), 1);
         assert!(state.scan_applied);
 
         state.poll_scan();
@@ -1290,5 +1652,148 @@ mod tests {
         assert!(msg.contains("Added to Bookmarks:"));
 
         crate::config::TEST_CONFIG_PATH.with(|p| *p.borrow_mut() = None);
+    }
+
+    #[test]
+    fn test_toggle_select_files() {
+        let dir = tempdir().unwrap();
+        let f1 = dir.path().join("file1.txt");
+        File::create(&f1).unwrap();
+
+        let mut state = AppState::new(dir.path().to_path_buf());
+        wait_for_scan(&mut state);
+
+        state.items = vec![mock_dir_entry(f1.clone(), 0, false)];
+        state.selected_index = 0;
+
+        assert!(state.selected_paths.is_empty());
+        state.toggle_select();
+        assert_eq!(state.selected_paths.len(), 1);
+        assert!(state.selected_paths.contains(&f1));
+
+        state.toggle_select();
+        assert!(state.selected_paths.is_empty());
+    }
+
+    #[test]
+    fn test_yank_and_paste_file() {
+        let dir = tempdir().unwrap();
+        let src_dir = dir.path().join("src_folder");
+        let dst_dir = dir.path().join("dst_folder");
+        std::fs::create_dir(&src_dir).unwrap();
+        std::fs::create_dir(&dst_dir).unwrap();
+
+        let file_path = src_dir.join("test.txt");
+        {
+            let mut f = File::create(&file_path).unwrap();
+            f.write_all(b"yank content").unwrap();
+        }
+
+        let mut state = AppState::new(dst_dir.clone());
+        wait_for_scan(&mut state);
+
+        // Mock current item
+        state.items = vec![mock_dir_entry(file_path.clone(), 12, false)];
+        state.selected_index = 0;
+
+        state.yank_full_path();
+        assert_eq!(state.yanked_files.len(), 1);
+        assert_eq!(state.yanked_files[0], file_path);
+
+        // Paste into state.current_path (which is dst_dir)
+        state.paste_files();
+
+        let pasted_path = dst_dir.join("test.txt");
+        assert!(pasted_path.exists());
+        assert_eq!(
+            std::fs::read_to_string(pasted_path).unwrap(),
+            "yank content"
+        );
+    }
+
+    #[test]
+    fn test_cut_and_paste_file() {
+        let dir = tempdir().unwrap();
+        let src_dir = dir.path().join("src_folder");
+        let dst_dir = dir.path().join("dst_folder");
+        std::fs::create_dir(&src_dir).unwrap();
+        std::fs::create_dir(&dst_dir).unwrap();
+
+        let file_path = src_dir.join("test.txt");
+        {
+            let mut f = File::create(&file_path).unwrap();
+            f.write_all(b"cut content").unwrap();
+        }
+
+        let mut state = AppState::new(dst_dir.clone());
+        wait_for_scan(&mut state);
+
+        state.items = vec![mock_dir_entry(file_path.clone(), 11, false)];
+        state.selected_index = 0;
+
+        state.cut_file();
+        assert_eq!(state.cut_files.len(), 1);
+        assert_eq!(state.cut_files[0], file_path);
+
+        state.paste_files();
+
+        let pasted_path = dst_dir.join("test.txt");
+        assert!(pasted_path.exists());
+        assert!(!file_path.exists());
+        assert_eq!(std::fs::read_to_string(pasted_path).unwrap(), "cut content");
+    }
+
+    #[test]
+    fn test_rename_file() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("old_name.txt");
+        {
+            let mut f = File::create(&file_path).unwrap();
+            f.write_all(b"rename content").unwrap();
+        }
+
+        let mut state = AppState::new(dir.path().to_path_buf());
+        wait_for_scan(&mut state);
+
+        state.items = vec![mock_dir_entry(file_path.clone(), 14, false)];
+        state.selected_index = 0;
+
+        state.request_rename();
+        assert!(state.rename_mode);
+        assert_eq!(state.rename_input, "old_name.txt");
+        assert_eq!(state.rename_target, Some(file_path.clone()));
+
+        state.rename_input = "new_name.txt".to_string();
+        state.confirm_rename();
+
+        assert!(!state.rename_mode);
+        assert!(state.rename_input.is_empty());
+
+        let new_file_path = dir.path().join("new_name.txt");
+        assert!(new_file_path.exists());
+        assert!(!file_path.exists());
+    }
+
+    #[test]
+    fn test_delete_file() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("delete_me.txt");
+        File::create(&file_path).unwrap();
+
+        let mut state = AppState::new(dir.path().to_path_buf());
+        wait_for_scan(&mut state);
+
+        state.items = vec![mock_dir_entry(file_path.clone(), 0, false)];
+        state.selected_index = 0;
+
+        state.request_delete();
+        assert_eq!(state.modal_mode, ModalMode::DeleteConfirmation);
+        assert_eq!(state.delete_targets.len(), 1);
+        assert_eq!(state.delete_targets[0], file_path);
+
+        state.confirm_delete();
+        assert_eq!(state.modal_mode, ModalMode::None);
+        assert!(state.delete_targets.is_empty());
+        assert!(!file_path.exists());
     }
 }

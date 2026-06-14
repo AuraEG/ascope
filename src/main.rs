@@ -104,8 +104,36 @@ fn event_loop(
                 }
             }
             ui::event::AppEvent::Key(key) => {
-                if state.modal_mode != crate::app::ModalMode::None {
-                    if state.modal_mode == crate::app::ModalMode::OpenConfirmation {
+                if state.rename_mode {
+                    match key.code {
+                        KeyCode::Esc => {
+                            state.rename_mode = false;
+                            state.rename_input.clear();
+                        }
+                        KeyCode::Enter => {
+                            state.confirm_rename();
+                        }
+                        KeyCode::Backspace => {
+                            state.rename_input.pop();
+                        }
+                        KeyCode::Char(c) => {
+                            state.rename_input.push(c);
+                        }
+                        _ => {}
+                    }
+                } else if state.modal_mode != crate::app::ModalMode::None {
+                    if state.modal_mode == crate::app::ModalMode::DeleteConfirmation {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                                state.modal_mode = crate::app::ModalMode::None;
+                                state.delete_targets.clear();
+                            }
+                            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                state.confirm_delete();
+                            }
+                            _ => {}
+                        }
+                    } else if state.modal_mode == crate::app::ModalMode::OpenConfirmation {
                         match key.code {
                             KeyCode::Esc => {
                                 state.modal_mode = state.modal_confirm_prev;
@@ -339,11 +367,19 @@ fn event_loop(
                             state.modal_selected_index = 0;
                             state.modal_input.clear();
                         }
-                        KeyCode::Char('r') => {
+                        KeyCode::Char('R') => {
                             state.modal_mode = crate::app::ModalMode::Recent;
                             state.modal_selected_index = 0;
                             state.modal_input.clear();
                         }
+                        KeyCode::Char(' ') => state.toggle_select(),
+                        KeyCode::Char('y') => state.yank_full_path(),
+                        KeyCode::Char('Y') => state.yank_filename(),
+                        KeyCode::Char('X') => state.cut_file(),
+                        KeyCode::Char('v') => state.paste_files(),
+                        KeyCode::Char('o') => state.open_in_system(),
+                        KeyCode::Char('d') => state.request_delete(),
+                        KeyCode::Char('r') => state.request_rename(),
                         _ => {}
                     }
                 }
