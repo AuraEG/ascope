@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use jwalk::WalkDir;
 
 use crate::fs::walker::{scan_path_async, PathStats, ScanProgress};
+use crate::git::GitContext;
 use ratatui::text::Line;
 
 // --------------------------------------------------------------------------
@@ -42,6 +43,8 @@ pub struct AppState {
     scan_applied: bool,
     /// Cache for the highlighted preview lines of the currently selected file.
     preview_cache: Option<(PathBuf, Vec<Line<'static>>)>,
+    /// Git context (branch, dirty count) if inside a git repository.
+    pub git_ctx: Option<GitContext>,
 }
 
 // --------------------------------------------------------------------------
@@ -62,6 +65,8 @@ impl AppState {
             Arc::clone(&scan_progress),
         );
 
+        let git_ctx = GitContext::read(&root);
+
         Self {
             current_path: root,
             active_stats,
@@ -72,6 +77,7 @@ impl AppState {
             search_query: String::new(),
             scan_applied: false,
             preview_cache: None,
+            git_ctx,
         }
     }
 
@@ -200,10 +206,11 @@ impl AppState {
         if len == 0 {
             return;
         }
-        // Up from index 0 wraps to the bottom; down from the last wraps to the top.
-        self.selected_index = match delta {
-            d if d > 0 => (self.selected_index + 1) % len,
-            _ => self.selected_index.checked_sub(1).unwrap_or(len - 1),
+        let idx = (self.selected_index as isize + delta) % len as isize;
+        self.selected_index = if idx < 0 {
+            (idx + len as isize) as usize
+        } else {
+            idx as usize
         };
     }
 
@@ -339,6 +346,18 @@ mod tests {
     }
 
     #[test]
+    fn test_move_selection_arbitrary_delta() {
+        let (mut state, _dir) = make_state_with_subdirs(); // Has 3 items (indices 0, 1, 2)
+        state.selected_index = 1;
+        state.move_selection(5); // 1 + 5 = 6 -> 6 % 3 = 0
+        assert_eq!(state.selected_index, 0);
+
+        state.selected_index = 1;
+        state.move_selection(-5); // 1 - 5 = -4 -> -4 % 3 = -1 -> -1 + 3 = 2
+        assert_eq!(state.selected_index, 2);
+    }
+
+    #[test]
     fn test_navigate_out_does_not_panic() {
         let dir = tempdir().unwrap();
         let mut state = AppState::new(dir.path().to_path_buf());
@@ -348,12 +367,20 @@ mod tests {
 
     #[test]
     fn test_live_filter_items() {
-        let mut state = AppState::new(PathBuf::from("."));
-        state.items = vec![
-            (PathBuf::from("Cargo.toml"), 100),
-            (PathBuf::from("src/main.rs"), 500),
-            (PathBuf::from("src/app.rs"), 300),
-        ];
+        let dir = tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+
+        let cargo_path = dir.path().join("Cargo.toml");
+        let main_path = src_dir.join("main.rs");
+        let app_path = src_dir.join("app.rs");
+
+        File::create(&cargo_path).unwrap();
+        File::create(&main_path).unwrap();
+        File::create(&app_path).unwrap();
+
+        let mut state = AppState::new(dir.path().to_path_buf());
+        wait_for_scan(&mut state);
 
         let filtered = state.filter_query("main");
         assert_eq!(filtered.len(), 1);
@@ -362,12 +389,20 @@ mod tests {
 
     #[test]
     fn test_visible_items_uses_search_query() {
-        let mut state = AppState::new(PathBuf::from("."));
-        state.items = vec![
-            (PathBuf::from("Cargo.toml"), 100),
-            (PathBuf::from("src/main.rs"), 500),
-            (PathBuf::from("src/app.rs"), 300),
-        ];
+        let dir = tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+
+        let cargo_path = dir.path().join("Cargo.toml");
+        let main_path = src_dir.join("main.rs");
+        let app_path = src_dir.join("app.rs");
+
+        File::create(&cargo_path).unwrap();
+        File::create(&main_path).unwrap();
+        File::create(&app_path).unwrap();
+
+        let mut state = AppState::new(dir.path().to_path_buf());
+        wait_for_scan(&mut state);
         state.search_query = String::from("app");
 
         let visible = state.visible_items();
@@ -377,7 +412,9 @@ mod tests {
 
     #[test]
     fn test_search_editing_resets_selection() {
-        let mut state = AppState::new(PathBuf::from("."));
+        let dir = tempdir().unwrap();
+        let mut state = AppState::new(dir.path().to_path_buf());
+        wait_for_scan(&mut state);
         state.items = vec![(PathBuf::from("alpha"), 1), (PathBuf::from("beta"), 1)];
         state.selected_index = 1;
 

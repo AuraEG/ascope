@@ -37,24 +37,22 @@ static THEME_SET: Lazy<ThemeSet> = Lazy::new(ThemeSet::load_defaults);
 /// tree with the active selection highlighted; the right pane shows a bar for
 /// each entry proportional to its share of the total scanned size.
 pub fn render_dashboard(f: &mut Frame, state: &AppState) {
-    let frame = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(if state.search_mode { 3 } else { 0 }),
-        ])
-        .split(f.size());
+    let layout = crate::ui::layout::build_layout(f.size(), false, state.search_mode);
 
     let panes = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(frame[0]);
+        .split(layout.main_area);
 
     render_tree(f, state, panes[0]);
     render_right_pane(f, state, panes[1]);
 
     if state.search_mode {
-        render_search_overlay(f, state, frame[1]);
+        render_search_overlay(f, state, layout.search_bar);
+    }
+
+    if layout.status_bar.height > 0 {
+        render_status_bar(f, state, layout.status_bar);
     }
 }
 
@@ -82,19 +80,8 @@ fn render_tree(f: &mut Frame, state: &AppState, area: Rect) {
         })
         .collect();
 
-    #[allow(clippy::cast_precision_loss)]
-    let total_mb = state.total_size() as f64 / 1_000_000.0;
-    let progress = state.scan_progress_label();
-    let scan_label = if progress.is_empty() {
-        String::new()
-    } else {
-        format!(" {progress}")
-    };
     let block = Block::default()
-        .title(format!(
-            " {}{scan_label} [{total_mb:.2} MB] ",
-            state.current_path.display()
-        ))
+        .title(" Directory Tree ")
         .borders(Borders::ALL);
 
     f.render_widget(List::new(items).block(block), area);
@@ -118,7 +105,7 @@ fn render_right_pane(f: &mut Frame, state: &AppState, area: Rect) {
 fn render_size_bars(f: &mut Frame, state: &AppState, area: Rect) {
     let visible = state.visible_items();
     // The largest entry anchors the scale so all bars are relative to it.
-    let max_size = visible.first().map(|x| x.1).unwrap_or(1);
+    let max_size = visible.first().map(|x| x.1).unwrap_or(0).max(1);
 
     let items: Vec<ListItem> = visible
         .iter()
@@ -245,6 +232,82 @@ fn render_search_overlay(f: &mut Frame, state: &AppState, area: Rect) {
     let prompt = Paragraph::new(format!("Search: {}", state.search_query)).block(block);
     f.render_widget(Clear, area);
     f.render_widget(prompt, area);
+}
+
+// --------------------------------------------------------------------------
+// [SECTION] Status Bar
+// --------------------------------------------------------------------------
+
+fn render_status_bar(f: &mut Frame, state: &AppState, area: Rect) {
+    let mut spans = Vec::new();
+
+    // 1. Current Path
+    let path = state.current_path.to_string_lossy();
+    spans.push(Span::styled(
+        format!(" {path} "),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+
+    // 2. Entries Count / Scanning
+    if state.is_scanning() {
+        let label = state.scan_progress_label();
+        spans.push(Span::styled(
+            format!(" {label} ({} entries) ", state.items.len()),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else {
+        spans.push(Span::styled(
+            format!(" {} entries ", state.items.len()),
+            Style::default().fg(Color::White),
+        ));
+    }
+    spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+
+    // 3. Total Size
+    #[allow(clippy::cast_precision_loss)]
+    let total_mb = state.total_size() as f64 / 1_000_000.0;
+    spans.push(Span::styled(
+        format!(" {:.2} MB ", total_mb),
+        Style::default().fg(Color::Green),
+    ));
+    spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+
+    // 4. Sort Mode
+    spans.push(Span::styled(
+        " sort: size↓ ",
+        Style::default().fg(Color::Magenta),
+    ));
+    spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+
+    // 5. Git Context
+    if let Some(git) = &state.git_ctx {
+        spans.push(Span::styled(
+            format!(" branch@{} ", git.branch),
+            Style::default().fg(Color::LightYellow),
+        ));
+        if git.dirty_count > 0 {
+            spans.push(Span::styled(
+                format!("●{} ", git.dirty_count),
+                Style::default().fg(Color::LightRed),
+            ));
+        }
+    } else {
+        spans.push(Span::styled(" no-git ", Style::default().fg(Color::Gray)));
+    }
+    spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+
+    // 6. Help Hint
+    spans.push(Span::styled(" [?]help ", Style::default().fg(Color::Gray)));
+
+    let paragraph =
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(30, 30, 40)));
+
+    f.render_widget(paragraph, area);
 }
 
 // --------------------------------------------------------------------------

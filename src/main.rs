@@ -11,6 +11,7 @@
 
 mod app;
 mod fs;
+mod git;
 mod shell;
 mod ui;
 
