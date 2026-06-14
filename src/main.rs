@@ -161,6 +161,11 @@ fn event_loop(
                         }
                         KeyCode::Char('s') => state.cycle_sort_mode(),
                         KeyCode::Char('e') => state.toggle_expand(),
+                        KeyCode::Char('t') => state.open_tab(state.current_path.clone()),
+                        KeyCode::Char('T') => state.open_home_tab(),
+                        KeyCode::Tab => state.next_tab(),
+                        KeyCode::BackTab => state.prev_tab(),
+                        KeyCode::Char('x') => state.close_tab(),
                         _ => {}
                     }
                 }

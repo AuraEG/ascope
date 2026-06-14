@@ -38,7 +38,11 @@ static THEME_SET: Lazy<ThemeSet> = Lazy::new(ThemeSet::load_defaults);
 /// tree with the active selection highlighted; the right pane shows a bar for
 /// each entry proportional to its share of the total scanned size.
 pub fn render_dashboard(f: &mut Frame, state: &AppState) {
-    let layout = crate::ui::layout::build_layout(f.size(), false, state.search_mode);
+    let layout = crate::ui::layout::build_layout(f.size(), true, state.search_mode);
+
+    if layout.tab_bar.height > 0 {
+        render_tab_bar(f, state, layout.tab_bar);
+    }
 
     let panes = Layout::default()
         .direction(Direction::Horizontal)
@@ -55,6 +59,39 @@ pub fn render_dashboard(f: &mut Frame, state: &AppState) {
     if layout.status_bar.height > 0 {
         render_status_bar(f, state, layout.status_bar);
     }
+}
+
+fn render_tab_bar(f: &mut Frame, state: &AppState, area: Rect) {
+    let mut spans = Vec::new();
+    spans.push(Span::raw(" "));
+
+    for (i, tab) in state.tabs.iter().enumerate() {
+        let path = &tab.current_path;
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+
+        let label = format!(" {}: {} ", i + 1, name);
+        if i == state.active_tab {
+            let style = if state.search_mode {
+                Style::default().fg(Color::Black).bg(Color::Yellow).bold()
+            } else {
+                Style::default().fg(Color::Black).bg(Color::Cyan).bold()
+            };
+            spans.push(Span::styled(label, style));
+        } else {
+            spans.push(Span::styled(
+                label,
+                Style::default().fg(Color::Gray).bg(Color::Rgb(40, 40, 40)),
+            ));
+        }
+        spans.push(Span::raw(" "));
+    }
+
+    let line = Line::from(spans);
+    let paragraph = Paragraph::new(line).style(Style::default().bg(Color::Rgb(20, 20, 20)));
+    f.render_widget(paragraph, area);
 }
 
 // --------------------------------------------------------------------------

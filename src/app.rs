@@ -34,9 +34,28 @@ pub enum SortMode {
 
 use crate::fs::walker::{DirEntry, EntryType};
 
-struct SearchCache {
+#[derive(Clone)]
+pub(crate) struct SearchCache {
     query: String,
     results: Vec<(DirEntry, u32)>,
+}
+
+/// Represents a single directory view tab with its own navigation history and search query.
+pub struct Tab {
+    pub current_path: PathBuf,
+    pub active_stats: Arc<Mutex<PathStats>>,
+    pub scan_progress: Arc<Mutex<ScanProgress>>,
+    pub items: Vec<DirEntry>,
+    pub all_entries: Vec<DirEntry>,
+    pub selected_index: usize,
+    pub search_mode: bool,
+    pub search_query: String,
+    pub scan_applied: bool,
+    pub preview_cache: Option<(PathBuf, String, Vec<Line<'static>>)>,
+    pub git_ctx: Option<GitContext>,
+    pub search_cache: RefCell<Option<SearchCache>>,
+    pub sort_mode: SortMode,
+    pub expanded_paths: std::collections::HashSet<PathBuf>,
 }
 
 /// Central state passed to every render call and mutated by keyboard events.
@@ -69,6 +88,10 @@ pub struct AppState {
     pub sort_mode: SortMode,
     /// Paths that are currently expanded in the tree view
     pub expanded_paths: std::collections::HashSet<PathBuf>,
+    /// All open tabs
+    pub tabs: Vec<Tab>,
+    /// Index of the active tab
+    pub active_tab: usize,
 }
 
 // --------------------------------------------------------------------------
@@ -91,6 +114,23 @@ impl AppState {
 
         let git_ctx = GitContext::read(&root);
 
+        let initial_tab = Tab {
+            current_path: root.clone(),
+            active_stats: Arc::clone(&active_stats),
+            scan_progress: Arc::clone(&scan_progress),
+            items: Vec::new(),
+            all_entries: Vec::new(),
+            selected_index: 0,
+            search_mode: false,
+            search_query: String::new(),
+            scan_applied: false,
+            preview_cache: None,
+            git_ctx: git_ctx.clone(),
+            search_cache: RefCell::new(None),
+            sort_mode: SortMode::SizeDesc,
+            expanded_paths: std::collections::HashSet::new(),
+        };
+
         Self {
             current_path: root,
             active_stats,
@@ -106,6 +146,8 @@ impl AppState {
             search_cache: RefCell::new(None),
             sort_mode: SortMode::SizeDesc,
             expanded_paths: std::collections::HashSet::new(),
+            tabs: vec![initial_tab],
+            active_tab: 0,
         }
     }
 
@@ -333,20 +375,196 @@ impl AppState {
         result
     }
 
-    /// Descend into the currently selected sub-directory and rescan.
+    /// Descend into the currently selected sub-directory and rescan inside the active tab.
     pub fn navigate_in(&mut self) {
         if let Some(target) = self.selected_item() {
             if target.entry_type == EntryType::Directory {
-                *self = Self::new(target.path);
+                let path = target.path;
+                let active_stats = Arc::new(Mutex::new(PathStats::default()));
+                let scan_progress = Arc::new(Mutex::new(ScanProgress::default()));
+
+                scan_path_async(
+                    path.clone(),
+                    Arc::clone(&active_stats),
+                    Arc::clone(&scan_progress),
+                );
+
+                let git_ctx = GitContext::read(&path);
+
+                self.current_path = path;
+                self.active_stats = active_stats;
+                self.scan_progress = scan_progress;
+                self.items = Vec::new();
+                self.all_entries = Vec::new();
+                self.selected_index = 0;
+                self.search_mode = false;
+                self.search_query = String::new();
+                self.scan_applied = false;
+                self.preview_cache = None;
+                self.git_ctx = git_ctx;
+                *self.search_cache.borrow_mut() = None;
+                self.expanded_paths = std::collections::HashSet::new();
+
+                self.save_active_tab();
             }
         }
     }
 
-    /// Ascend to the parent directory and rescan.
+    /// Ascend to the parent directory and rescan inside the active tab.
     pub fn navigate_out(&mut self) {
         if let Some(parent) = self.current_path.parent() {
-            *self = Self::new(parent.to_path_buf());
+            let path = parent.to_path_buf();
+            let active_stats = Arc::new(Mutex::new(PathStats::default()));
+            let scan_progress = Arc::new(Mutex::new(ScanProgress::default()));
+
+            scan_path_async(
+                path.clone(),
+                Arc::clone(&active_stats),
+                Arc::clone(&scan_progress),
+            );
+
+            let git_ctx = GitContext::read(&path);
+
+            self.current_path = path;
+            self.active_stats = active_stats;
+            self.scan_progress = scan_progress;
+            self.items = Vec::new();
+            self.all_entries = Vec::new();
+            self.selected_index = 0;
+            self.search_mode = false;
+            self.search_query = String::new();
+            self.scan_applied = false;
+            self.preview_cache = None;
+            self.git_ctx = git_ctx;
+            *self.search_cache.borrow_mut() = None;
+            self.expanded_paths = std::collections::HashSet::new();
+
+            self.save_active_tab();
         }
+    }
+
+    /// Save the active state values into the corresponding Tab struct inside self.tabs.
+    pub fn save_active_tab(&mut self) {
+        if self.active_tab < self.tabs.len() {
+            self.tabs[self.active_tab] = Tab {
+                current_path: self.current_path.clone(),
+                active_stats: Arc::clone(&self.active_stats),
+                scan_progress: Arc::clone(&self.scan_progress),
+                items: self.items.clone(),
+                all_entries: self.all_entries.clone(),
+                selected_index: self.selected_index,
+                search_mode: self.search_mode,
+                search_query: self.search_query.clone(),
+                scan_applied: self.scan_applied,
+                preview_cache: self.preview_cache.clone(),
+                git_ctx: self.git_ctx.clone(),
+                search_cache: RefCell::new(self.search_cache.borrow().clone()),
+                sort_mode: self.sort_mode,
+                expanded_paths: self.expanded_paths.clone(),
+            };
+        }
+    }
+
+    /// Load the specified tab index state values into the AppState active fields.
+    pub fn load_tab(&mut self, index: usize) {
+        if index < self.tabs.len() {
+            let tab = &self.tabs[index];
+            self.current_path = tab.current_path.clone();
+            self.active_stats = Arc::clone(&tab.active_stats);
+            self.scan_progress = Arc::clone(&tab.scan_progress);
+            self.items = tab.items.clone();
+            self.all_entries = tab.all_entries.clone();
+            self.selected_index = tab.selected_index;
+            self.search_mode = tab.search_mode;
+            self.search_query = tab.search_query.clone();
+            self.scan_applied = tab.scan_applied;
+            self.preview_cache = tab.preview_cache.clone();
+            self.git_ctx = tab.git_ctx.clone();
+            self.search_cache = tab.search_cache.clone();
+            self.sort_mode = tab.sort_mode;
+            self.expanded_paths = tab.expanded_paths.clone();
+            self.active_tab = index;
+        }
+    }
+
+    /// Open a new tab at the specified path and switch to it.
+    pub fn open_tab(&mut self, path: PathBuf) {
+        self.save_active_tab();
+
+        let active_stats = Arc::new(Mutex::new(PathStats::default()));
+        let scan_progress = Arc::new(Mutex::new(ScanProgress::default()));
+
+        scan_path_async(
+            path.clone(),
+            Arc::clone(&active_stats),
+            Arc::clone(&scan_progress),
+        );
+
+        let git_ctx = GitContext::read(&path);
+
+        let new_tab = Tab {
+            current_path: path,
+            active_stats,
+            scan_progress,
+            items: Vec::new(),
+            all_entries: Vec::new(),
+            selected_index: 0,
+            search_mode: false,
+            search_query: String::new(),
+            scan_applied: false,
+            preview_cache: None,
+            git_ctx,
+            search_cache: RefCell::new(None),
+            sort_mode: self.sort_mode,
+            expanded_paths: std::collections::HashSet::new(),
+        };
+
+        self.tabs.push(new_tab);
+        let new_idx = self.tabs.len() - 1;
+        self.load_tab(new_idx);
+    }
+
+    /// Open a new tab at the home directory and switch to it.
+    pub fn open_home_tab(&mut self) {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/"));
+        self.open_tab(home);
+    }
+
+    /// Close the active tab and switch to another tab. Reject if it is the last tab.
+    pub fn close_tab(&mut self) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        self.tabs.remove(self.active_tab);
+        let new_idx = if self.active_tab >= self.tabs.len() {
+            self.tabs.len() - 1
+        } else {
+            self.active_tab
+        };
+        self.load_tab(new_idx);
+    }
+
+    /// Cycle to the next tab.
+    pub fn next_tab(&mut self) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        self.save_active_tab();
+        let new_idx = (self.active_tab + 1) % self.tabs.len();
+        self.load_tab(new_idx);
+    }
+
+    /// Cycle to the previous tab.
+    pub fn prev_tab(&mut self) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        self.save_active_tab();
+        let new_idx = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+        self.load_tab(new_idx);
     }
 
     /// Move the selection cursor by `delta` rows, wrapping at both ends.
@@ -808,5 +1026,38 @@ mod tests {
         let visible_collapsed = state.visible_items();
         assert_eq!(visible_collapsed.len(), 1);
         assert_eq!(visible_collapsed[0].0.path, sub);
+    }
+
+    #[test]
+    fn test_tab_management() {
+        let dir = tempdir().unwrap();
+        let mut state = AppState::new(dir.path().to_path_buf());
+        wait_for_scan(&mut state);
+
+        // Initial state has 1 tab
+        assert_eq!(state.tabs.len(), 1);
+        assert_eq!(state.active_tab, 0);
+
+        // Try to close the last tab -> should be rejected (len stays 1)
+        state.close_tab();
+        assert_eq!(state.tabs.len(), 1);
+
+        // Open a new tab at the same path
+        state.open_tab(dir.path().to_path_buf());
+        assert_eq!(state.tabs.len(), 2);
+        assert_eq!(state.active_tab, 1);
+
+        // Switch back to the first tab using prev_tab
+        state.prev_tab();
+        assert_eq!(state.active_tab, 0);
+
+        // Switch to the second tab using next_tab
+        state.next_tab();
+        assert_eq!(state.active_tab, 1);
+
+        // Close the second tab -> active tab should fall back to 0
+        state.close_tab();
+        assert_eq!(state.tabs.len(), 1);
+        assert_eq!(state.active_tab, 0);
     }
 }
