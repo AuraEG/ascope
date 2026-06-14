@@ -59,6 +59,12 @@ pub fn render_dashboard(f: &mut Frame, state: &AppState) {
     if layout.status_bar.height > 0 {
         render_status_bar(f, state, layout.status_bar);
     }
+
+    if state.modal_mode != crate::app::ModalMode::None {
+        render_modal(f, state);
+    }
+
+    render_notification(f, state);
 }
 
 fn render_tab_bar(f: &mut Frame, state: &AppState, area: Rect) {
@@ -92,6 +98,287 @@ fn render_tab_bar(f: &mut Frame, state: &AppState, area: Rect) {
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line).style(Style::default().bg(Color::Rgb(20, 20, 20)));
     f.render_widget(paragraph, area);
+}
+
+fn render_modal(f: &mut Frame, state: &AppState) {
+    if state.modal_mode == crate::app::ModalMode::None {
+        return;
+    }
+
+    if state.modal_mode == crate::app::ModalMode::OpenConfirmation {
+        render_open_confirmation(f, state);
+        return;
+    }
+
+    let area = centered_rect(70, 60, f.size());
+    let screen = f.size();
+
+    // 1. Draw Dropshadow
+    if area.width > 1 && area.height > 1 {
+        let shadow_area = Rect {
+            x: (area.x + 1).min(screen.width.saturating_sub(1)),
+            y: (area.y + 1).min(screen.height.saturating_sub(1)),
+            width: area.width.min(screen.width.saturating_sub(area.x + 1)),
+            height: area.height.min(screen.height.saturating_sub(area.y + 1)),
+        };
+        let shadow_block = Block::default().style(Style::default().bg(Color::Rgb(12, 12, 16)));
+        f.render_widget(shadow_block, shadow_area);
+    }
+
+    // 2. Prepare Title and Footer Lines
+    let title_text = match state.modal_mode {
+        crate::app::ModalMode::Bookmarks => " Bookmarks persistence ",
+        crate::app::ModalMode::Recent => " Recently Visited Directories ",
+        crate::app::ModalMode::None | crate::app::ModalMode::OpenConfirmation => "",
+    };
+    let title_line = Line::from(vec![
+        Span::styled(" 󰉋 ", Style::default().fg(Color::Rgb(150, 100, 220)).bold()),
+        Span::styled(title_text, Style::default().fg(Color::LightCyan).bold()),
+        Span::styled(" ", Style::default()),
+    ]);
+
+    let footer_line = if !state.modal_input.is_empty() {
+        Line::from(vec![
+            Span::styled(
+                " Go to index: ",
+                Style::default().fg(Color::Rgb(240, 200, 50)).bold(),
+            ),
+            Span::styled(
+                state.modal_input.clone(),
+                Style::default().fg(Color::White).bold(),
+            ),
+            Span::styled(
+                " │ [Enter] jump │ [Esc] cancel ",
+                Style::default().fg(Color::Gray),
+            ),
+        ])
+    } else {
+        match state.modal_mode {
+            crate::app::ModalMode::Bookmarks => Line::from(vec![
+                Span::styled(
+                    " [Enter] ",
+                    Style::default().fg(Color::Rgb(0, 180, 216)).bold(),
+                ),
+                Span::styled("jump ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    " [Esc] ",
+                    Style::default().fg(Color::Rgb(0, 180, 216)).bold(),
+                ),
+                Span::styled("close ", Style::default().fg(Color::Gray)),
+                Span::styled(" [D] ", Style::default().fg(Color::Rgb(220, 50, 50)).bold()),
+                Span::styled("delete ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    " [1-9] ",
+                    Style::default().fg(Color::Rgb(240, 200, 50)).bold(),
+                ),
+                Span::styled("direct jump ", Style::default().fg(Color::Gray)),
+            ]),
+            crate::app::ModalMode::Recent => Line::from(vec![
+                Span::styled(
+                    " [Enter] ",
+                    Style::default().fg(Color::Rgb(0, 180, 216)).bold(),
+                ),
+                Span::styled("jump ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    " [Esc] ",
+                    Style::default().fg(Color::Rgb(0, 180, 216)).bold(),
+                ),
+                Span::styled("close ", Style::default().fg(Color::Gray)),
+                Span::styled(" [D] ", Style::default().fg(Color::Rgb(220, 50, 50)).bold()),
+                Span::styled("delete ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    " [1-9] ",
+                    Style::default().fg(Color::Rgb(240, 200, 50)).bold(),
+                ),
+                Span::styled("direct jump ", Style::default().fg(Color::Gray)),
+            ]),
+            crate::app::ModalMode::None | crate::app::ModalMode::OpenConfirmation => {
+                Line::default()
+            }
+        }
+    };
+
+    let block = Block::default()
+        .title(title_line)
+        .title_alignment(Alignment::Center)
+        .title_bottom(footer_line)
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(150, 100, 220))) // sleek purple border
+        .style(Style::default().bg(Color::Rgb(25, 25, 30))); // deep background
+
+    let is_empty = match state.modal_mode {
+        crate::app::ModalMode::Bookmarks => state.config.bookmarks.is_empty(),
+        crate::app::ModalMode::Recent => state.config.recent.is_empty(),
+        crate::app::ModalMode::None | crate::app::ModalMode::OpenConfirmation => true,
+    };
+
+    if is_empty {
+        let msg = match state.modal_mode {
+            crate::app::ModalMode::Bookmarks => {
+                "\n\n\n  No bookmarks saved yet.\n\n  Press 'm' in the directory tree to bookmark any directory."
+            }
+            crate::app::ModalMode::Recent => {
+                "\n\n\n  No recently visited directories."
+            }
+            crate::app::ModalMode::None | crate::app::ModalMode::OpenConfirmation => "",
+        };
+        let paragraph = Paragraph::new(msg)
+            .block(block)
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::Rgb(160, 160, 160)));
+
+        f.render_widget(Clear, area);
+        f.render_widget(paragraph, area);
+        return;
+    }
+
+    let list_items: Vec<ListItem> = match state.modal_mode {
+        crate::app::ModalMode::Bookmarks => state
+            .config
+            .bookmarks
+            .iter()
+            .enumerate()
+            .map(|(i, path)| {
+                let is_selected = i == state.modal_selected_index;
+                let matches_input = if !state.modal_input.is_empty() {
+                    if let Ok(idx) = state.modal_input.parse::<usize>() {
+                        idx.saturating_sub(1) == i
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                let mut spans = Vec::new();
+                if matches_input {
+                    spans.push(Span::styled(
+                        " ⚡ ",
+                        Style::default().fg(Color::Rgb(240, 200, 50)).bold(),
+                    ));
+                } else if is_selected {
+                    spans.push(Span::styled(
+                        " ➔ ",
+                        Style::default().fg(Color::Rgb(0, 180, 216)).bold(),
+                    ));
+                } else {
+                    spans.push(Span::raw("   "));
+                }
+
+                let index_style = if matches_input {
+                    Style::default().fg(Color::White).bold()
+                } else if is_selected {
+                    Style::default().fg(Color::Rgb(240, 200, 50)).bold()
+                } else {
+                    Style::default().fg(Color::Rgb(150, 150, 150))
+                };
+                spans.push(Span::styled(format!("[{}] ", i + 1), index_style));
+
+                let path_str = path.display().to_string();
+                let path_style = if matches_input || is_selected {
+                    Style::default().fg(Color::White).bold()
+                } else {
+                    Style::default().fg(Color::Rgb(180, 180, 180))
+                };
+                spans.push(Span::styled(path_str, path_style));
+
+                let item_style = if matches_input {
+                    Style::default().bg(Color::Rgb(100, 40, 180))
+                } else if is_selected {
+                    Style::default().bg(Color::Rgb(50, 50, 75))
+                } else {
+                    Style::default()
+                };
+
+                ListItem::new(Line::from(spans)).style(item_style)
+            })
+            .collect(),
+        crate::app::ModalMode::Recent => state
+            .config
+            .recent
+            .iter()
+            .enumerate()
+            .map(|(i, path)| {
+                let is_selected = i == state.modal_selected_index;
+                let matches_input = if !state.modal_input.is_empty() {
+                    if let Ok(idx) = state.modal_input.parse::<usize>() {
+                        idx.saturating_sub(1) == i
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                let mut spans = Vec::new();
+                if matches_input {
+                    spans.push(Span::styled(
+                        " ⚡ ",
+                        Style::default().fg(Color::Rgb(240, 200, 50)).bold(),
+                    ));
+                } else if is_selected {
+                    spans.push(Span::styled(
+                        " ➔ ",
+                        Style::default().fg(Color::Rgb(0, 180, 216)).bold(),
+                    ));
+                } else {
+                    spans.push(Span::raw("   "));
+                }
+
+                let index_style = if matches_input {
+                    Style::default().fg(Color::White).bold()
+                } else if is_selected {
+                    Style::default().fg(Color::Rgb(240, 200, 50)).bold()
+                } else {
+                    Style::default().fg(Color::Rgb(150, 150, 150))
+                };
+                spans.push(Span::styled(format!("[{}] ", i + 1), index_style));
+
+                let path_str = path.display().to_string();
+                let path_style = if matches_input || is_selected {
+                    Style::default().fg(Color::White).bold()
+                } else {
+                    Style::default().fg(Color::Rgb(180, 180, 180))
+                };
+                spans.push(Span::styled(path_str, path_style));
+
+                let item_style = if matches_input {
+                    Style::default().bg(Color::Rgb(100, 40, 180))
+                } else if is_selected {
+                    Style::default().bg(Color::Rgb(50, 50, 75))
+                } else {
+                    Style::default()
+                };
+
+                ListItem::new(Line::from(spans)).style(item_style)
+            })
+            .collect(),
+        crate::app::ModalMode::None | crate::app::ModalMode::OpenConfirmation => Vec::new(),
+    };
+
+    f.render_widget(Clear, area);
+    f.render_widget(List::new(list_items).block(block), area);
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
 
 // --------------------------------------------------------------------------
@@ -697,6 +984,138 @@ fn render_status_bar(f: &mut Frame, state: &AppState, area: Rect) {
         Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(30, 30, 40)));
 
     f.render_widget(paragraph, area);
+}
+
+fn centered_rect_fixed(width: u16, height: u16, r: Rect) -> Rect {
+    let x = r.x + r.width.saturating_sub(width) / 2;
+    let y = r.y + r.height.saturating_sub(height) / 2;
+    Rect {
+        x,
+        y,
+        width: width.min(r.width),
+        height: height.min(r.height),
+    }
+}
+
+fn render_open_confirmation(f: &mut Frame, state: &AppState) {
+    let path_str = if let Some(path) = &state.modal_target_path {
+        path.to_string_lossy().to_string()
+    } else {
+        String::new()
+    };
+    let display_path = if path_str.len() > 42 {
+        format!("...{}", &path_str[path_str.len() - 39..])
+    } else {
+        path_str
+    };
+
+    let target_label = Line::from(vec![
+        Span::styled(" Path: ", Style::default().fg(Color::Gray)),
+        Span::styled(display_path, Style::default().fg(Color::White).bold()),
+    ]);
+
+    let prompt_label = Line::from(vec![Span::styled(
+        " Open this directory in:",
+        Style::default().fg(Color::Gray),
+    )]);
+
+    let same_style = if !state.modal_confirm_new_tab {
+        Style::default().fg(Color::Black).bg(Color::Cyan).bold()
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let same_choice = Span::styled(" Same Tab [s] ", same_style);
+
+    let new_style = if state.modal_confirm_new_tab {
+        Style::default().fg(Color::Black).bg(Color::Cyan).bold()
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let new_choice = Span::styled(" New Tab [n] ", new_style);
+
+    let choices_line = Line::from(vec![
+        Span::raw("    "),
+        same_choice,
+        Span::raw("        "),
+        new_choice,
+    ]);
+
+    let content = vec![
+        Line::default(),
+        target_label,
+        Line::default(),
+        prompt_label,
+        Line::default(),
+        choices_line,
+    ];
+
+    let footer_line = Line::from(vec![
+        Span::styled(" [Left/Right] ", Style::default().fg(Color::Cyan).bold()),
+        Span::styled("switch │ ", Style::default().fg(Color::Gray)),
+        Span::styled(" [Enter] ", Style::default().fg(Color::Cyan).bold()),
+        Span::styled("confirm │ ", Style::default().fg(Color::Gray)),
+        Span::styled(" [Esc] ", Style::default().fg(Color::Cyan).bold()),
+        Span::styled("back ", Style::default().fg(Color::Gray)),
+    ]);
+
+    let block = Block::default()
+        .title(Line::from(vec![
+            Span::styled(" 󰉋 ", Style::default().fg(Color::Rgb(150, 100, 220)).bold()),
+            Span::styled(
+                " Open Directory ",
+                Style::default().fg(Color::LightCyan).bold(),
+            ),
+            Span::styled(" ", Style::default()),
+        ]))
+        .title_alignment(Alignment::Center)
+        .title_bottom(footer_line)
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(150, 100, 220)))
+        .style(Style::default().bg(Color::Rgb(25, 25, 30)));
+
+    let area = centered_rect_fixed(50, 9, f.size());
+    let screen = f.size();
+    if area.width > 1 && area.height > 1 {
+        let shadow_area = Rect {
+            x: (area.x + 1).min(screen.width.saturating_sub(1)),
+            y: (area.y + 1).min(screen.height.saturating_sub(1)),
+            width: area.width.min(screen.width.saturating_sub(area.x + 1)),
+            height: area.height.min(screen.height.saturating_sub(area.y + 1)),
+        };
+        let shadow_block = Block::default().style(Style::default().bg(Color::Rgb(12, 12, 16)));
+        f.render_widget(shadow_block, shadow_area);
+    }
+
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(content).block(block), area);
+}
+
+fn get_notification_area(screen: Rect, width: u16, height: u16) -> Rect {
+    Rect {
+        x: screen.width.saturating_sub(width + 2),
+        y: screen.height.saturating_sub(height + 3),
+        width: width + 2,
+        height: height + 2,
+    }
+}
+
+fn render_notification(f: &mut Frame, state: &AppState) {
+    if let Some((msg, _)) = &state.notification {
+        let text = Line::from(vec![
+            Span::styled(" 󰄬 ", Style::default().fg(Color::Green).bold()),
+            Span::styled(msg.clone(), Style::default().fg(Color::White)),
+        ]);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Green))
+            .style(Style::default().bg(Color::Rgb(20, 35, 30)));
+
+        let msg_len = msg.len() as u16;
+        let area = get_notification_area(f.size(), msg_len + 4, 1);
+        f.render_widget(Clear, area);
+        f.render_widget(Paragraph::new(text).block(block), area);
+    }
 }
 
 // --------------------------------------------------------------------------

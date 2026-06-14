@@ -10,6 +10,7 @@
 // ==========================================================================
 
 mod app;
+mod config;
 mod fs;
 mod git;
 mod shell;
@@ -96,9 +97,175 @@ fn event_loop(
         match events.next()? {
             ui::event::AppEvent::Tick => {
                 state.poll_scan();
+                if let Some((_, timestamp)) = &state.notification {
+                    if timestamp.elapsed() >= Duration::from_secs(3) {
+                        state.notification = None;
+                    }
+                }
             }
             ui::event::AppEvent::Key(key) => {
-                if state.search_mode {
+                if state.modal_mode != crate::app::ModalMode::None {
+                    if state.modal_mode == crate::app::ModalMode::OpenConfirmation {
+                        match key.code {
+                            KeyCode::Esc => {
+                                state.modal_mode = state.modal_confirm_prev;
+                                state.modal_target_path = None;
+                            }
+                            KeyCode::Left
+                            | KeyCode::Right
+                            | KeyCode::Char('h')
+                            | KeyCode::Char('l')
+                            | KeyCode::Tab => {
+                                state.modal_confirm_new_tab = !state.modal_confirm_new_tab;
+                            }
+                            KeyCode::Char('s') => {
+                                if let Some(path) = state.modal_target_path.take() {
+                                    state.jump_to_path(path);
+                                }
+                                state.modal_mode = crate::app::ModalMode::None;
+                                state.modal_input.clear();
+                            }
+                            KeyCode::Char('n') => {
+                                if let Some(path) = state.modal_target_path.take() {
+                                    state.open_tab(path);
+                                }
+                                state.modal_mode = crate::app::ModalMode::None;
+                                state.modal_input.clear();
+                            }
+                            KeyCode::Enter => {
+                                if let Some(path) = state.modal_target_path.take() {
+                                    if state.modal_confirm_new_tab {
+                                        state.open_tab(path);
+                                    } else {
+                                        state.jump_to_path(path);
+                                    }
+                                }
+                                state.modal_mode = crate::app::ModalMode::None;
+                                state.modal_input.clear();
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        match key.code {
+                            KeyCode::Esc => {
+                                state.modal_mode = crate::app::ModalMode::None;
+                                state.modal_input.clear();
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                let len = match state.modal_mode {
+                                    crate::app::ModalMode::Bookmarks => {
+                                        state.config.bookmarks.len()
+                                    }
+                                    crate::app::ModalMode::Recent => state.config.recent.len(),
+                                    _ => 0,
+                                };
+                                if len > 0 {
+                                    state.modal_selected_index =
+                                        (state.modal_selected_index + len - 1) % len;
+                                }
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                let len = match state.modal_mode {
+                                    crate::app::ModalMode::Bookmarks => {
+                                        state.config.bookmarks.len()
+                                    }
+                                    crate::app::ModalMode::Recent => state.config.recent.len(),
+                                    _ => 0,
+                                };
+                                if len > 0 {
+                                    state.modal_selected_index =
+                                        (state.modal_selected_index + 1) % len;
+                                }
+                            }
+                            KeyCode::Enter => {
+                                let target_path = if !state.modal_input.is_empty() {
+                                    if let Ok(idx) = state.modal_input.parse::<usize>() {
+                                        let idx = idx.saturating_sub(1);
+                                        match state.modal_mode {
+                                            crate::app::ModalMode::Bookmarks => {
+                                                state.config.bookmarks.get(idx).cloned()
+                                            }
+                                            crate::app::ModalMode::Recent => {
+                                                state.config.recent.get(idx).cloned()
+                                            }
+                                            _ => None,
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    match state.modal_mode {
+                                        crate::app::ModalMode::Bookmarks => state
+                                            .config
+                                            .bookmarks
+                                            .get(state.modal_selected_index)
+                                            .cloned(),
+                                        crate::app::ModalMode::Recent => state
+                                            .config
+                                            .recent
+                                            .get(state.modal_selected_index)
+                                            .cloned(),
+                                        _ => None,
+                                    }
+                                };
+
+                                if let Some(path) = target_path {
+                                    state.modal_target_path = Some(path);
+                                    state.modal_confirm_prev = state.modal_mode;
+                                    state.modal_mode = crate::app::ModalMode::OpenConfirmation;
+                                    state.modal_confirm_new_tab = false;
+                                } else {
+                                    state.modal_mode = crate::app::ModalMode::None;
+                                    state.modal_input.clear();
+                                }
+                            }
+                            KeyCode::Char('D') => {
+                                if state.modal_mode == crate::app::ModalMode::Bookmarks {
+                                    state.remove_bookmark(state.modal_selected_index);
+                                } else if state.modal_mode == crate::app::ModalMode::Recent {
+                                    state.remove_recent(state.modal_selected_index);
+                                }
+                            }
+                            KeyCode::Char(c) if c.is_ascii_digit() => {
+                                state.modal_input.push(c);
+                                if let Ok(idx) = state.modal_input.parse::<usize>() {
+                                    let idx = idx.saturating_sub(1);
+                                    let len = match state.modal_mode {
+                                        crate::app::ModalMode::Bookmarks => {
+                                            state.config.bookmarks.len()
+                                        }
+                                        crate::app::ModalMode::Recent => state.config.recent.len(),
+                                        _ => 0,
+                                    };
+                                    if idx < len {
+                                        state.modal_selected_index = idx;
+                                    }
+                                }
+                            }
+                            KeyCode::Backspace => {
+                                state.modal_input.pop();
+                                if !state.modal_input.is_empty() {
+                                    if let Ok(idx) = state.modal_input.parse::<usize>() {
+                                        let idx = idx.saturating_sub(1);
+                                        let len = match state.modal_mode {
+                                            crate::app::ModalMode::Bookmarks => {
+                                                state.config.bookmarks.len()
+                                            }
+                                            crate::app::ModalMode::Recent => {
+                                                state.config.recent.len()
+                                            }
+                                            _ => 0,
+                                        };
+                                        if idx < len {
+                                            state.modal_selected_index = idx;
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if state.search_mode {
                     match key.code {
                         KeyCode::Esc => state.toggle_search_mode(),
                         KeyCode::Enter => state.toggle_search_mode(),
@@ -166,6 +333,17 @@ fn event_loop(
                         KeyCode::Tab => state.next_tab(),
                         KeyCode::BackTab => state.prev_tab(),
                         KeyCode::Char('x') => state.close_tab(),
+                        KeyCode::Char('m') => state.add_bookmark(),
+                        KeyCode::Char('b') => {
+                            state.modal_mode = crate::app::ModalMode::Bookmarks;
+                            state.modal_selected_index = 0;
+                            state.modal_input.clear();
+                        }
+                        KeyCode::Char('r') => {
+                            state.modal_mode = crate::app::ModalMode::Recent;
+                            state.modal_selected_index = 0;
+                            state.modal_input.clear();
+                        }
                         _ => {}
                     }
                 }

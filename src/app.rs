@@ -32,6 +32,14 @@ pub enum SortMode {
     MtimeDesc,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModalMode {
+    None,
+    Bookmarks,
+    Recent,
+    OpenConfirmation,
+}
+
 use crate::fs::walker::{DirEntry, EntryType};
 
 #[derive(Clone)]
@@ -92,6 +100,22 @@ pub struct AppState {
     pub tabs: Vec<Tab>,
     /// Index of the active tab
     pub active_tab: usize,
+    /// Persistent bookmark configuration
+    pub config: crate::config::Config,
+    /// Current open modal type
+    pub modal_mode: ModalMode,
+    /// Highlighted cursor index inside the modal
+    pub modal_selected_index: usize,
+    /// Input buffer for typing number to select modal entries
+    pub modal_input: String,
+    /// Notification toast message with timestamp
+    pub notification: Option<(String, std::time::Instant)>,
+    /// Temp target path for tab open confirmation
+    pub modal_target_path: Option<PathBuf>,
+    /// Previous modal mode before confirmation popup
+    pub modal_confirm_prev: ModalMode,
+    /// Whether to open confirmation target path in a new tab
+    pub modal_confirm_new_tab: bool,
 }
 
 // --------------------------------------------------------------------------
@@ -113,6 +137,17 @@ impl AppState {
         );
 
         let git_ctx = GitContext::read(&root);
+
+        let mut config = crate::config::Config::load();
+        // Skip adding "." or empty paths to recent if we want to resolve to absolute, but keeping it simple and direct is standard.
+        // Wait, to make it completely correct and consistent, let's normalize or use it directly. Using directly is perfect.
+        if !config.recent.contains(&root) {
+            config.recent.push_front(root.clone());
+            if config.recent.len() > 50 {
+                config.recent.pop_back();
+            }
+            config.save();
+        }
 
         let initial_tab = Tab {
             current_path: root.clone(),
@@ -148,6 +183,14 @@ impl AppState {
             expanded_paths: std::collections::HashSet::new(),
             tabs: vec![initial_tab],
             active_tab: 0,
+            config,
+            modal_mode: ModalMode::None,
+            modal_selected_index: 0,
+            modal_input: String::new(),
+            notification: None,
+            modal_target_path: None,
+            modal_confirm_prev: ModalMode::None,
+            modal_confirm_new_tab: false,
         }
     }
 
@@ -391,7 +434,7 @@ impl AppState {
 
                 let git_ctx = GitContext::read(&path);
 
-                self.current_path = path;
+                self.current_path = path.clone();
                 self.active_stats = active_stats;
                 self.scan_progress = scan_progress;
                 self.items = Vec::new();
@@ -405,6 +448,7 @@ impl AppState {
                 *self.search_cache.borrow_mut() = None;
                 self.expanded_paths = std::collections::HashSet::new();
 
+                self.record_navigation(path);
                 self.save_active_tab();
             }
         }
@@ -425,7 +469,7 @@ impl AppState {
 
             let git_ctx = GitContext::read(&path);
 
-            self.current_path = path;
+            self.current_path = path.clone();
             self.active_stats = active_stats;
             self.scan_progress = scan_progress;
             self.items = Vec::new();
@@ -439,6 +483,7 @@ impl AppState {
             *self.search_cache.borrow_mut() = None;
             self.expanded_paths = std::collections::HashSet::new();
 
+            self.record_navigation(path);
             self.save_active_tab();
         }
     }
@@ -565,6 +610,94 @@ impl AppState {
         self.save_active_tab();
         let new_idx = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
         self.load_tab(new_idx);
+    }
+
+    /// Record a newly navigated directory in the recently visited list.
+    pub fn record_navigation(&mut self, path: PathBuf) {
+        if !self.config.recent.contains(&path) {
+            self.config.recent.push_front(path);
+            if self.config.recent.len() > 50 {
+                self.config.recent.pop_back();
+            }
+            self.config.save();
+        }
+    }
+
+    /// Add the active tab's current path to the bookmarks list.
+    pub fn add_bookmark(&mut self) {
+        let path = self.current_path.clone();
+        if !self.config.bookmarks.contains(&path) {
+            self.config.bookmarks.push(path);
+            self.config.save();
+            let name = self
+                .current_path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.current_path.to_string_lossy().into_owned());
+            self.notification = Some((
+                format!("Added to Bookmarks: {}", name),
+                std::time::Instant::now(),
+            ));
+        }
+    }
+
+    /// Remove a bookmark by index.
+    pub fn remove_bookmark(&mut self, index: usize) {
+        if index < self.config.bookmarks.len() {
+            self.config.bookmarks.remove(index);
+            self.config.save();
+            // Clamp modal selection index
+            if self.config.bookmarks.is_empty() {
+                self.modal_selected_index = 0;
+            } else if self.modal_selected_index >= self.config.bookmarks.len() {
+                self.modal_selected_index = self.config.bookmarks.len() - 1;
+            }
+        }
+    }
+
+    /// Remove a recently visited path by index.
+    pub fn remove_recent(&mut self, index: usize) {
+        if index < self.config.recent.len() {
+            self.config.recent.remove(index);
+            self.config.save();
+            // Clamp modal selection index
+            if self.config.recent.is_empty() {
+                self.modal_selected_index = 0;
+            } else if self.modal_selected_index >= self.config.recent.len() {
+                self.modal_selected_index = self.config.recent.len() - 1;
+            }
+        }
+    }
+
+    /// Jump to a specific directory path inside the active tab.
+    pub fn jump_to_path(&mut self, path: PathBuf) {
+        let active_stats = Arc::new(Mutex::new(PathStats::default()));
+        let scan_progress = Arc::new(Mutex::new(ScanProgress::default()));
+
+        scan_path_async(
+            path.clone(),
+            Arc::clone(&active_stats),
+            Arc::clone(&scan_progress),
+        );
+
+        let git_ctx = GitContext::read(&path);
+
+        self.current_path = path.clone();
+        self.active_stats = active_stats;
+        self.scan_progress = scan_progress;
+        self.items = Vec::new();
+        self.all_entries = Vec::new();
+        self.selected_index = 0;
+        self.search_mode = false;
+        self.search_query = String::new();
+        self.scan_applied = false;
+        self.preview_cache = None;
+        self.git_ctx = git_ctx;
+        *self.search_cache.borrow_mut() = None;
+        self.expanded_paths = std::collections::HashSet::new();
+
+        self.record_navigation(path);
+        self.save_active_tab();
     }
 
     /// Move the selection cursor by `delta` rows, wrapping at both ends.
@@ -1059,5 +1192,103 @@ mod tests {
         state.close_tab();
         assert_eq!(state.tabs.len(), 1);
         assert_eq!(state.active_tab, 0);
+    }
+
+    #[test]
+    fn test_bookmarks_and_recent_history() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("bookmarks.json");
+        crate::config::TEST_CONFIG_PATH.with(|p| *p.borrow_mut() = Some(config_file.clone()));
+
+        let mut state = AppState::new(dir.path().to_path_buf());
+        wait_for_scan(&mut state);
+
+        // Active path should be automatically added to recent history on startup
+        assert_eq!(state.config.recent.len(), 1);
+        assert_eq!(state.config.recent[0], dir.path());
+
+        // Add a bookmark
+        state.add_bookmark();
+        assert_eq!(state.config.bookmarks.len(), 1);
+        assert_eq!(state.config.bookmarks[0], dir.path());
+
+        // Try adding duplicates (should not duplicate)
+        state.add_bookmark();
+        assert_eq!(state.config.bookmarks.len(), 1);
+
+        // Remove bookmark
+        state.remove_bookmark(0);
+        assert_eq!(state.config.bookmarks.len(), 0);
+
+        crate::config::TEST_CONFIG_PATH.with(|p| *p.borrow_mut() = None);
+    }
+
+    #[test]
+    fn test_config_persistence_and_deduplication() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("bookmarks.json");
+        crate::config::TEST_CONFIG_PATH.with(|p| *p.borrow_mut() = Some(config_file.clone()));
+
+        let mut config = crate::config::Config::default();
+        config.bookmarks.push(PathBuf::from("/a"));
+        config.bookmarks.push(PathBuf::from("/a")); // duplicate
+        config.bookmarks.push(PathBuf::from("/b"));
+        config.save();
+
+        // Load config from file
+        let loaded = crate::config::Config::load();
+        // Duplicate "/a" should be stripped/deduplicated on load
+        assert_eq!(loaded.bookmarks.len(), 2);
+        assert_eq!(loaded.bookmarks[0], PathBuf::from("/a"));
+        assert_eq!(loaded.bookmarks[1], PathBuf::from("/b"));
+
+        crate::config::TEST_CONFIG_PATH.with(|p| *p.borrow_mut() = None);
+    }
+
+    #[test]
+    fn test_remove_recent() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("bookmarks.json");
+        crate::config::TEST_CONFIG_PATH.with(|p| *p.borrow_mut() = Some(config_file.clone()));
+
+        let mut state = AppState::new(dir.path().to_path_buf());
+        wait_for_scan(&mut state);
+
+        state.record_navigation(PathBuf::from("/recent_a"));
+        state.record_navigation(PathBuf::from("/recent_b"));
+
+        assert!(state.config.recent.contains(&PathBuf::from("/recent_a")));
+        assert!(state.config.recent.contains(&PathBuf::from("/recent_b")));
+
+        // Let's find index of /recent_a
+        let idx = state
+            .config
+            .recent
+            .iter()
+            .position(|p| p == &PathBuf::from("/recent_a"))
+            .unwrap();
+        state.remove_recent(idx);
+
+        assert!(!state.config.recent.contains(&PathBuf::from("/recent_a")));
+
+        crate::config::TEST_CONFIG_PATH.with(|p| *p.borrow_mut() = None);
+    }
+
+    #[test]
+    fn test_bookmark_notification() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("bookmarks.json");
+        crate::config::TEST_CONFIG_PATH.with(|p| *p.borrow_mut() = Some(config_file.clone()));
+
+        let mut state = AppState::new(dir.path().to_path_buf());
+        wait_for_scan(&mut state);
+
+        assert!(state.notification.is_none());
+        state.add_bookmark();
+        assert!(state.notification.is_some());
+        let (msg, _) = state.notification.unwrap();
+        assert!(msg.contains("Added to Bookmarks:"));
+
+        crate::config::TEST_CONFIG_PATH.with(|p| *p.borrow_mut() = None);
     }
 }
