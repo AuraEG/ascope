@@ -104,7 +104,23 @@ fn event_loop(
                 }
             }
             ui::event::AppEvent::Key(key) => {
-                if state.rename_mode {
+                if state.show_help {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('?') => {
+                            state.show_help = false;
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            let count = 28;
+                            state.help_selected_index = (state.help_selected_index + 1) % count;
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            let count = 28;
+                            state.help_selected_index =
+                                (state.help_selected_index + count - 1) % count;
+                        }
+                        _ => {}
+                    }
+                } else if state.rename_mode {
                     match key.code {
                         KeyCode::Esc => {
                             state.rename_mode = false;
@@ -380,6 +396,10 @@ fn event_loop(
                         KeyCode::Char('o') => state.open_in_system(),
                         KeyCode::Char('d') => state.request_delete(),
                         KeyCode::Char('r') => state.request_rename(),
+                        KeyCode::Char('?') => {
+                            state.show_help = true;
+                            state.help_selected_index = 0;
+                        }
                         _ => {}
                     }
                 }

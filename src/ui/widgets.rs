@@ -67,6 +67,10 @@ pub fn render_dashboard(f: &mut Frame, state: &AppState) {
         render_modal(f, state);
     }
 
+    if state.show_help {
+        render_help_modal(f, state);
+    }
+
     render_notification(f, state);
 }
 
@@ -509,10 +513,12 @@ fn render_tree(f: &mut Frame, state: &AppState, area: Rect) {
             }
 
             let mtime_str = format_system_time(mtime);
-            spans.push(Span::styled(
-                format!(" [{}]", mtime_str),
-                Style::default().fg(Color::DarkGray),
-            ));
+            let mtime_style = if actual_idx == state.selected_index {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            spans.push(Span::styled(format!(" [{}]", mtime_str), mtime_style));
 
             let item_style = if actual_idx == state.selected_index {
                 Style::default().fg(Color::Cyan).bg(Color::DarkGray)
@@ -1250,6 +1256,274 @@ fn render_notification(f: &mut Frame, state: &AppState) {
     }
 }
 
+struct HelpItem {
+    key: &'static str,
+    desc: &'static str,
+    context: &'static str,
+}
+
+static HELP_ITEMS: &[HelpItem] = &[
+    HelpItem {
+        key: "q / Esc",
+        desc: "Quit application",
+        context: "General",
+    },
+    HelpItem {
+        key: "?",
+        desc: "Toggle help screen",
+        context: "General",
+    },
+    HelpItem {
+        key: "j / Down",
+        desc: "Move cursor down",
+        context: "Navigation",
+    },
+    HelpItem {
+        key: "k / Up",
+        desc: "Move cursor up",
+        context: "Navigation",
+    },
+    HelpItem {
+        key: "h / Left",
+        desc: "Navigate out to parent folder",
+        context: "Navigation",
+    },
+    HelpItem {
+        key: "Enter",
+        desc: "Enter directory / Open file in EDITOR",
+        context: "Navigation",
+    },
+    HelpItem {
+        key: "e",
+        desc: "Toggle inline directory expansion",
+        context: "Navigation",
+    },
+    HelpItem {
+        key: "s",
+        desc: "Cycle sort mode (size/name/mtime)",
+        context: "Navigation",
+    },
+    HelpItem {
+        key: "t",
+        desc: "Open new tab at current path",
+        context: "Tabs",
+    },
+    HelpItem {
+        key: "T",
+        desc: "Open new tab at home folder",
+        context: "Tabs",
+    },
+    HelpItem {
+        key: "Tab",
+        desc: "Switch to next tab",
+        context: "Tabs",
+    },
+    HelpItem {
+        key: "Shift+Tab",
+        desc: "Switch to previous tab",
+        context: "Tabs",
+    },
+    HelpItem {
+        key: "x",
+        desc: "Close active tab (keeps at least one)",
+        context: "Tabs",
+    },
+    HelpItem {
+        key: "m",
+        desc: "Bookmark current folder",
+        context: "Bookmarks",
+    },
+    HelpItem {
+        key: "b",
+        desc: "Open bookmarks modal",
+        context: "Bookmarks",
+    },
+    HelpItem {
+        key: "R",
+        desc: "Open recently visited history modal",
+        context: "Bookmarks",
+    },
+    HelpItem {
+        key: "Space",
+        desc: "Toggle selection of current item",
+        context: "File Actions",
+    },
+    HelpItem {
+        key: "y",
+        desc: "Yank full path(s) to clipboard",
+        context: "File Actions",
+    },
+    HelpItem {
+        key: "Y",
+        desc: "Yank filename(s) to clipboard",
+        context: "File Actions",
+    },
+    HelpItem {
+        key: "X",
+        desc: "Cut file(s) for moving",
+        context: "File Actions",
+    },
+    HelpItem {
+        key: "v",
+        desc: "Paste yanked/cut files here",
+        context: "File Actions",
+    },
+    HelpItem {
+        key: "o",
+        desc: "Open selected in system default application",
+        context: "File Actions",
+    },
+    HelpItem {
+        key: "d",
+        desc: "Delete selected file(s)/folder(s)",
+        context: "File Actions",
+    },
+    HelpItem {
+        key: "r",
+        desc: "Inline rename selected file/folder",
+        context: "File Actions",
+    },
+    HelpItem {
+        key: "/",
+        desc: "Fuzzy search files and directories",
+        context: "Search",
+    },
+    HelpItem {
+        key: "Esc",
+        desc: "Close current overlay / modal",
+        context: "Modals",
+    },
+    HelpItem {
+        key: "1-9",
+        desc: "Direct jump by index inside modals",
+        context: "Modals",
+    },
+    HelpItem {
+        key: "D",
+        desc: "Remove entry from bookmarks/recent",
+        context: "Modals",
+    },
+];
+
+fn render_help_modal(f: &mut Frame, state: &AppState) {
+    let area = centered_rect(80, 85, f.size());
+    let screen = f.size();
+
+    // 1. Draw Dropshadow
+    if area.width > 1 && area.height > 1 {
+        let shadow_area = Rect {
+            x: (area.x + 1).min(screen.width.saturating_sub(1)),
+            y: (area.y + 1).min(screen.height.saturating_sub(1)),
+            width: area.width.min(screen.width.saturating_sub(area.x + 1)),
+            height: area.height.min(screen.height.saturating_sub(area.y + 1)),
+        };
+        let shadow_block = Block::default().style(Style::default().bg(Color::Rgb(12, 12, 16)));
+        f.render_widget(shadow_block, shadow_area);
+    }
+
+    // 2. Prepare block title and footer
+    let title_line = Line::from(vec![
+        Span::styled(" 󰞋 ", Style::default().fg(Color::Rgb(150, 100, 220)).bold()),
+        Span::styled(
+            " Keyboard Shortcuts & Keybinding Map ",
+            Style::default().fg(Color::LightCyan).bold(),
+        ),
+        Span::styled(" ", Style::default()),
+    ]);
+
+    let footer_line = Line::from(vec![
+        Span::styled(" [j/k / Up/Down] ", Style::default().fg(Color::Cyan).bold()),
+        Span::styled("scroll │ ", Style::default().fg(Color::Gray)),
+        Span::styled(" [Esc / ?] ", Style::default().fg(Color::Cyan).bold()),
+        Span::styled("close help ", Style::default().fg(Color::Gray)),
+    ]);
+
+    let block = Block::default()
+        .title(title_line)
+        .title_alignment(Alignment::Center)
+        .title_bottom(footer_line)
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(150, 100, 220))) // sleek purple border
+        .style(Style::default().bg(Color::Rgb(25, 25, 30))); // deep background
+
+    let header_cells = vec![
+        ratatui::widgets::Cell::from(Span::styled(
+            "Keybinding",
+            Style::default().fg(Color::LightCyan).bold(),
+        )),
+        ratatui::widgets::Cell::from(Span::styled(
+            "Action Description",
+            Style::default().fg(Color::LightCyan).bold(),
+        )),
+        ratatui::widgets::Cell::from(Span::styled(
+            "Section",
+            Style::default().fg(Color::LightCyan).bold(),
+        )),
+    ];
+    let header = ratatui::widgets::Row::new(header_cells)
+        .style(Style::default().bg(Color::Rgb(35, 35, 45)))
+        .height(1)
+        .bottom_margin(1);
+
+    let rows: Vec<ratatui::widgets::Row> = HELP_ITEMS
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let is_selected = i == state.help_selected_index;
+            let style = if is_selected {
+                Style::default().fg(Color::Black).bg(Color::Cyan).bold()
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            let key_span = Span::styled(
+                item.key,
+                if is_selected {
+                    Style::default().fg(Color::Black).bold()
+                } else {
+                    Style::default().fg(Color::Rgb(240, 200, 50)).bold() // Gold key highlight
+                },
+            );
+            let desc_span = Span::raw(item.desc);
+            let ctx_span = Span::styled(
+                item.context,
+                if is_selected {
+                    Style::default().fg(Color::Black)
+                } else {
+                    Style::default().fg(Color::Rgb(150, 100, 220)) // Purple section tag
+                },
+            );
+
+            ratatui::widgets::Row::new(vec![
+                ratatui::widgets::Cell::from(key_span),
+                ratatui::widgets::Cell::from(desc_span),
+                ratatui::widgets::Cell::from(ctx_span),
+            ])
+            .style(style)
+        })
+        .collect();
+
+    // Calculate column constraints
+    let widths = [
+        Constraint::Percentage(25),
+        Constraint::Percentage(55),
+        Constraint::Percentage(20),
+    ];
+
+    // Scroll state management using ratatui's TableState
+    let mut table_state = ratatui::widgets::TableState::default();
+    table_state.select(Some(state.help_selected_index));
+
+    let table = ratatui::widgets::Table::new(rows, widths)
+        .header(header)
+        .block(block)
+        .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan).bold());
+
+    f.render_widget(Clear, area);
+    f.render_stateful_widget(table, area, &mut table_state);
+}
+
 // --------------------------------------------------------------------------
 // [SECTION] Tests
 // --------------------------------------------------------------------------
@@ -1307,5 +1581,21 @@ mod tests {
         let epoch = std::time::SystemTime::UNIX_EPOCH;
         let formatted = format_system_time(epoch);
         assert!(formatted.starts_with("1970") || formatted.starts_with("1969"));
+    }
+
+    #[test]
+    fn test_help_modal_items() {
+        let has_quit = HELP_ITEMS
+            .iter()
+            .any(|item| item.desc.to_lowercase().contains("quit"));
+        let has_navigate = HELP_ITEMS.iter().any(|item| {
+            item.desc.to_lowercase().contains("navigate")
+                || item.desc.to_lowercase().contains("directory")
+        });
+        assert!(has_quit, "Help items should contain quit description");
+        assert!(
+            has_navigate,
+            "Help items should contain navigate/directory description"
+        );
     }
 }

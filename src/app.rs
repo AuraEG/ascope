@@ -131,6 +131,10 @@ pub struct AppState {
     pub rename_mode: bool,
     /// Target paths for deletion confirmation
     pub delete_targets: Vec<PathBuf>,
+    /// Whether full-screen help modal is open
+    pub show_help: bool,
+    /// Selected index inside the help modal
+    pub help_selected_index: usize,
 }
 
 // --------------------------------------------------------------------------
@@ -213,6 +217,8 @@ impl AppState {
             rename_input: String::new(),
             rename_mode: false,
             delete_targets: Vec::new(),
+            show_help: false,
+            help_selected_index: 0,
         }
     }
 
@@ -1795,5 +1801,16 @@ mod tests {
         assert_eq!(state.modal_mode, ModalMode::None);
         assert!(state.delete_targets.is_empty());
         assert!(!file_path.exists());
+    }
+
+    #[test]
+    fn test_help_modal_state() {
+        let dir = tempdir().unwrap();
+        let mut state = AppState::new(dir.path().to_path_buf());
+        assert!(!state.show_help);
+        assert_eq!(state.help_selected_index, 0);
+
+        state.show_help = true;
+        assert!(state.show_help);
     }
 }
