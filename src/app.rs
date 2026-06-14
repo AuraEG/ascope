@@ -10,7 +10,6 @@
 // ==========================================================================
 
 use std::cell::RefCell;
-use std::cmp::Reverse;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -26,10 +25,18 @@ use ratatui::text::Line;
 // [SECTION] State
 // --------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortMode {
+    SizeDesc,
+    NameAsc,
+    MtimeDesc,
+}
+
+use crate::fs::walker::{DirEntry, EntryType};
+
 struct SearchCache {
     query: String,
-    results: Vec<(PathBuf, u64, u32)>,
+    results: Vec<(DirEntry, u32)>,
 }
 
 /// Central state passed to every render call and mutated by keyboard events.
@@ -41,9 +48,9 @@ pub struct AppState {
     /// Lifecycle of the background scan for `current_path`.
     scan_progress: Arc<Mutex<ScanProgress>>,
     /// Direct child directories sorted by size descending; drives the list.
-    pub items: Vec<(PathBuf, u64)>,
-    /// All entries (path, size, display_path) scanned recursively under the root path.
-    pub all_entries: Vec<(PathBuf, u64, String)>,
+    pub items: Vec<DirEntry>,
+    /// All entries scanned recursively under the root path.
+    pub all_entries: Vec<DirEntry>,
     /// Index of the highlighted row in the currently visible item set.
     pub selected_index: usize,
     /// Whether the bottom search overlay is currently focused.
@@ -58,6 +65,10 @@ pub struct AppState {
     pub git_ctx: Option<GitContext>,
     /// Memoized cache of the last query match results
     search_cache: RefCell<Option<SearchCache>>,
+    /// Active sorting mode
+    pub sort_mode: SortMode,
+    /// Paths that are currently expanded in the tree view
+    pub expanded_paths: std::collections::HashSet<PathBuf>,
 }
 
 // --------------------------------------------------------------------------
@@ -93,6 +104,8 @@ impl AppState {
             preview_cache: None,
             git_ctx,
             search_cache: RefCell::new(None),
+            sort_mode: SortMode::SizeDesc,
+            expanded_paths: std::collections::HashSet::new(),
         }
     }
 
@@ -136,21 +149,60 @@ impl AppState {
             )
         {
             let stats = self.active_stats.lock().unwrap_or_else(|e| e.into_inner());
-            let mut new_items: Vec<(PathBuf, u64)> = stats.subdirs.clone().into_iter().collect();
-            // Largest directories first so the user immediately spots disk hogs.
-            new_items.sort_by_key(|x| Reverse(x.1));
+            let new_items: Vec<DirEntry> = stats
+                .all_entries
+                .iter()
+                .filter(|entry| {
+                    entry.entry_type == EntryType::Directory
+                        && entry.path.parent() == Some(&self.current_path)
+                })
+                .cloned()
+                .collect();
             self.all_entries = stats.all_entries.clone();
             *self.search_cache.borrow_mut() = None;
             drop(stats);
             self.items = new_items;
+            self.sort_items();
             self.scan_applied = true;
         }
+    }
+
+    /// Sort items based on the active sort mode.
+    pub fn sort_items(&mut self) {
+        match self.sort_mode {
+            SortMode::SizeDesc => {
+                self.items
+                    .sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
+            }
+            SortMode::NameAsc => {
+                self.items.sort_by(|a, b| {
+                    let name_a = a.path.file_name().unwrap_or_default();
+                    let name_b = b.path.file_name().unwrap_or_default();
+                    name_a.cmp(name_b)
+                });
+            }
+            SortMode::MtimeDesc => {
+                self.items
+                    .sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.path.cmp(&b.path)));
+            }
+        }
+    }
+
+    /// Cycle through size -> name -> modification time sorting modes.
+    pub fn cycle_sort_mode(&mut self) {
+        self.sort_mode = match self.sort_mode {
+            SortMode::SizeDesc => SortMode::NameAsc,
+            SortMode::NameAsc => SortMode::MtimeDesc,
+            SortMode::MtimeDesc => SortMode::SizeDesc,
+        };
+        self.sort_items();
+        self.selected_index = 0;
     }
 
     /// Check if the currently highlighted item is a file and update the
     /// preview cache if the selected file or search query has changed.
     pub fn update_preview_cache(&mut self) {
-        let selected = self.selected_item().map(|x| x.0);
+        let selected = self.selected_item().map(|x| x.path);
 
         if let Some((cached_path, cached_query, _)) = &self.preview_cache {
             if Some(cached_path) == selected.as_ref() && cached_query == &self.search_query {
@@ -183,9 +235,9 @@ impl AppState {
     // ------------------------------------------------------------------
 
     /// Return the currently visible items, filtered when search is active.
-    pub fn visible_items(&self) -> Vec<(PathBuf, u64, u32)> {
+    pub fn visible_items(&self) -> Vec<(DirEntry, u32)> {
         if self.search_query.is_empty() {
-            return self.items.iter().map(|(p, s)| (p.clone(), *s, 0)).collect();
+            return self.build_expanded_tree();
         }
 
         // Check if cached query matches current query
@@ -206,20 +258,86 @@ impl AppState {
     }
 
     /// Return the currently selected visible entry, if any.
-    pub fn selected_item(&self) -> Option<(PathBuf, u64)> {
+    pub fn selected_item(&self) -> Option<DirEntry> {
         let visible = self.visible_items();
         if visible.is_empty() {
             return None;
         }
         let index = self.selected_index.min(visible.len() - 1);
-        visible.get(index).map(|(p, s, _)| (p.clone(), *s))
+        visible.get(index).map(|(e, _)| e.clone())
+    }
+
+    /// Toggle the expansion state of the currently selected directory.
+    pub fn toggle_expand(&mut self) {
+        if let Some(entry) = self.selected_item() {
+            if entry.entry_type == EntryType::Directory {
+                if self.expanded_paths.contains(&entry.path) {
+                    self.expanded_paths.remove(&entry.path);
+                } else {
+                    self.expanded_paths.insert(entry.path.clone());
+                }
+                // Clamp selected_index to the new visible bounds
+                let len = self.visible_items().len();
+                if len > 0 && self.selected_index >= len {
+                    self.selected_index = len - 1;
+                }
+            }
+        }
+    }
+
+    fn get_children(&self, parent_path: &std::path::Path) -> Vec<DirEntry> {
+        let mut children: Vec<DirEntry> = self
+            .all_entries
+            .iter()
+            .filter(|e| e.path.parent() == Some(parent_path))
+            .cloned()
+            .collect();
+
+        // Sort children using the active sorting mode
+        match self.sort_mode {
+            SortMode::SizeDesc => {
+                children.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
+            }
+            SortMode::NameAsc => {
+                children.sort_by(|a, b| {
+                    let name_a = a.path.file_name().unwrap_or_default();
+                    let name_b = b.path.file_name().unwrap_or_default();
+                    name_a.cmp(name_b)
+                });
+            }
+            SortMode::MtimeDesc => {
+                children.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.path.cmp(&b.path)));
+            }
+        }
+        children
+    }
+
+    fn build_expanded_tree(&self) -> Vec<(DirEntry, u32)> {
+        let mut result = Vec::new();
+        // Start with top-level items (which are already sorted in self.items)
+        let mut stack: Vec<(DirEntry, usize)> =
+            self.items.iter().rev().map(|e| (e.clone(), 0)).collect();
+
+        while let Some((entry, depth)) = stack.pop() {
+            result.push((entry.clone(), 0));
+            if entry.entry_type == EntryType::Directory && self.expanded_paths.contains(&entry.path)
+            {
+                // Get children of this directory, sorted in reverse order so that when popped from stack they come out in correct order
+                let mut children = self.get_children(&entry.path);
+                children.reverse();
+                for child in children {
+                    stack.push((child, depth + 1));
+                }
+            }
+        }
+        result
     }
 
     /// Descend into the currently selected sub-directory and rescan.
     pub fn navigate_in(&mut self) {
-        if let Some((target, _)) = self.selected_item() {
-            if target.is_dir() {
-                *self = Self::new(target);
+        if let Some(target) = self.selected_item() {
+            if target.entry_type == EntryType::Directory {
+                *self = Self::new(target.path);
             }
         }
     }
@@ -270,13 +388,12 @@ impl AppState {
     }
 
     /// Fuzzy match query over files and directories using the Nucleo matcher engine.
-    /// Returns a list of matches (PathBuf, size, score) ranked by score descending.
-    pub fn filter_query(&self, query: &str) -> Vec<(PathBuf, u64, u32)> {
+    pub fn filter_query(&self, query: &str) -> Vec<(DirEntry, u32)> {
         if query.is_empty() {
             return self
                 .all_entries
                 .iter()
-                .map(|(path, size, _)| (path.clone(), *size, 0))
+                .map(|entry| (entry.clone(), 0))
                 .collect();
         }
 
@@ -284,35 +401,32 @@ impl AppState {
         let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
 
         struct MatchItem<'a> {
-            path: &'a PathBuf,
-            size: u64,
-            display_path: &'a str,
+            entry: &'a DirEntry,
         }
 
         impl<'a> AsRef<str> for MatchItem<'a> {
             fn as_ref(&self) -> &str {
-                self.display_path
+                &self.entry.display_path
             }
         }
 
         let items: Vec<MatchItem> = self
             .all_entries
             .iter()
-            .map(|(path, size, display_path)| MatchItem {
-                path,
-                size: *size,
-                display_path,
-            })
+            .map(|entry| MatchItem { entry })
             .collect();
 
         let mut matches = pattern.match_list(items, &mut matcher);
 
         // Rank results by score descending, then by path alphabetically for stability
-        matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.path.cmp(b.0.path)));
+        matches.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| a.0.entry.path.cmp(&b.0.entry.path))
+        });
 
         matches
             .into_iter()
-            .map(|(item, score)| (item.path.clone(), item.size, score))
+            .map(|(item, score)| (item.entry.clone(), score))
             .collect()
     }
 }
@@ -407,6 +521,21 @@ mod tests {
         state.navigate_out();
     }
 
+    fn mock_dir_entry(path: PathBuf, size: u64, is_dir: bool) -> DirEntry {
+        DirEntry {
+            path,
+            size,
+            entry_type: if is_dir {
+                EntryType::Directory
+            } else {
+                EntryType::File
+            },
+            mtime: std::time::SystemTime::UNIX_EPOCH,
+            display_path: String::new(),
+            symlink_target: None,
+        }
+    }
+
     #[test]
     fn test_live_filter_items() {
         let dir = tempdir().unwrap();
@@ -426,7 +555,7 @@ mod tests {
 
         let filtered = state.filter_query("main");
         assert_eq!(filtered.len(), 1);
-        assert!(filtered[0].0.ends_with(PathBuf::from("src/main.rs")));
+        assert!(filtered[0].0.path.ends_with(PathBuf::from("src/main.rs")));
     }
 
     #[test]
@@ -449,7 +578,7 @@ mod tests {
 
         let visible = state.visible_items();
         assert_eq!(visible.len(), 1);
-        assert!(visible[0].0.ends_with(PathBuf::from("src/app.rs")));
+        assert!(visible[0].0.path.ends_with(PathBuf::from("src/app.rs")));
     }
 
     #[test]
@@ -457,7 +586,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
-        state.items = vec![(PathBuf::from("alpha"), 1), (PathBuf::from("beta"), 1)];
+        state.items = vec![
+            mock_dir_entry(PathBuf::from("alpha"), 1, true),
+            mock_dir_entry(PathBuf::from("beta"), 1, true),
+        ];
         state.selected_index = 1;
 
         state.push_search_char('a');
@@ -483,7 +615,7 @@ mod tests {
         let filtered = state.filter_query("main.rs");
 
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].0, file_path);
+        assert_eq!(filtered[0].0.path, file_path);
     }
 
     #[test]
@@ -493,9 +625,6 @@ mod tests {
         f.write_all(b"data").unwrap();
 
         let mut state = AppState::new(dir.path().to_path_buf());
-        // The scan starts asynchronously. We don't assert the transient Scanning
-        // state because it may already be Complete before this thread is scheduled.
-        // We only assert the deterministic post-wait outcome.
         wait_for_scan(&mut state);
         assert!(!state.is_scanning(), "scan must not be Scanning after wait");
         assert!(
@@ -513,19 +642,16 @@ mod tests {
     #[test]
     fn test_poll_scan_files_only() {
         let dir = tempdir().unwrap();
-        // Create only a file, no subdirectories
         let mut f = File::create(dir.path().join("only_file.txt")).unwrap();
         f.write_all(b"data").unwrap();
 
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
 
-        // Should be complete, and scan_applied should be true
         assert!(!state.is_scanning());
         assert!(state.items.is_empty());
         assert!(state.scan_applied);
 
-        // Subsequent polls should be no-ops and not lock indefinitely
         state.poll_scan();
     }
 
@@ -539,22 +665,17 @@ mod tests {
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
 
-        // Set state items explicitly for cursor movement/selection testing
-        state.items = vec![(file_path.clone(), 12)];
+        state.items = vec![mock_dir_entry(file_path.clone(), 12, false)];
         state.selected_index = 0;
 
-        // Verify initially cache is empty
         assert!(state.preview_lines().is_empty());
 
-        // Update preview cache
         state.update_preview_cache();
 
-        // Check if cache contains the selected file lines
         let lines = state.preview_lines();
         assert!(!lines.is_empty());
         assert!(lines[0].to_string().contains("fn test()"));
 
-        // Change selection to None (or clear items) and check that cache is cleared
         state.items.clear();
         state.update_preview_cache();
         assert!(state.preview_lines().is_empty());
@@ -573,11 +694,11 @@ mod tests {
 
         let matches_mrs = state.filter_query("mrs");
         assert_eq!(matches_mrs.len(), 1);
-        assert_eq!(matches_mrs[0].0, main_path);
+        assert_eq!(matches_mrs[0].0.path, main_path);
 
         let matches_crgo = state.filter_query("crgo");
         assert_eq!(matches_crgo.len(), 1);
-        assert_eq!(matches_crgo[0].0, cargo_path);
+        assert_eq!(matches_crgo[0].0.path, cargo_path);
     }
 
     #[test]
@@ -606,5 +727,86 @@ mod tests {
 
         let filtered = state.filter_query("nonexistent");
         assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_sorting_modes() {
+        let dir = tempdir().unwrap();
+        let mut state = AppState::new(dir.path().to_path_buf());
+
+        let t1 = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(100);
+        let t2 = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(200);
+
+        let e1 = DirEntry {
+            path: PathBuf::from("z_file"),
+            size: 50,
+            entry_type: EntryType::Directory,
+            mtime: t1,
+            display_path: String::new(),
+            symlink_target: None,
+        };
+        let e2 = DirEntry {
+            path: PathBuf::from("a_file"),
+            size: 100,
+            entry_type: EntryType::Directory,
+            mtime: t2,
+            display_path: String::new(),
+            symlink_target: None,
+        };
+
+        state.items = vec![e1.clone(), e2.clone()];
+
+        state.sort_items();
+        assert_eq!(state.items[0].path, PathBuf::from("a_file"));
+
+        state.sort_mode = SortMode::NameAsc;
+        state.sort_items();
+        assert_eq!(state.items[0].path, PathBuf::from("a_file"));
+
+        state.sort_mode = SortMode::MtimeDesc;
+        state.sort_items();
+        assert_eq!(state.items[0].path, PathBuf::from("a_file"));
+
+        state.sort_mode = SortMode::SizeDesc;
+        state.cycle_sort_mode();
+        assert_eq!(state.sort_mode, SortMode::NameAsc);
+    }
+
+    #[test]
+    fn test_directory_expansion() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("sub_dir");
+        std::fs::create_dir(&sub).unwrap();
+        let child_file = sub.join("child.txt");
+        {
+            let mut f = File::create(&child_file).unwrap();
+            f.write_all(b"hello world").unwrap();
+        }
+
+        let mut state = AppState::new(dir.path().to_path_buf());
+        wait_for_scan(&mut state);
+
+        // Before expansion: only directory is visible (top-level items only contains directories)
+        let visible_before = state.visible_items();
+        assert_eq!(visible_before.len(), 1);
+        assert_eq!(visible_before[0].0.path, sub);
+
+        // Select the directory and toggle expand
+        state.selected_index = 0;
+        state.toggle_expand();
+
+        // After expansion: both directory and child_file should be visible
+        let visible_after = state.visible_items();
+        assert_eq!(visible_after.len(), 2);
+        assert_eq!(visible_after[0].0.path, sub);
+        assert_eq!(visible_after[1].0.path, child_file);
+
+        // Toggle expand again to collapse
+        state.toggle_expand();
+
+        // After collapse: only directory is visible again
+        let visible_collapsed = state.visible_items();
+        assert_eq!(visible_collapsed.len(), 1);
+        assert_eq!(visible_collapsed[0].0.path, sub);
     }
 }

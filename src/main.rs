@@ -116,10 +116,10 @@ fn event_loop(
                         KeyCode::Down | KeyCode::Char('j') => state.move_selection(1),
                         KeyCode::Up | KeyCode::Char('k') => state.move_selection(-1),
                         KeyCode::Enter => {
-                            if let Some((target, _)) = state.selected_item() {
-                                if target.is_dir() {
+                            if let Some(target) = state.selected_item() {
+                                if target.entry_type == crate::fs::walker::EntryType::Directory {
                                     state.navigate_in();
-                                } else if target.is_file() {
+                                } else if target.entry_type == crate::fs::walker::EntryType::File {
                                     disable_raw_mode()?;
                                     execute!(
                                         terminal.backend_mut(),
@@ -136,7 +136,7 @@ fn event_loop(
                                     {
                                         cmd.arg(format!("+/{}", state.search_query));
                                     }
-                                    cmd.arg(&target);
+                                    cmd.arg(&target.path);
 
                                     let mut child = cmd.spawn()?;
                                     let _status = child.wait()?;
@@ -159,6 +159,8 @@ fn event_loop(
                                 state.clear_search();
                             }
                         }
+                        KeyCode::Char('s') => state.cycle_sort_mode(),
+                        KeyCode::Char('e') => state.toggle_expand(),
                         _ => {}
                     }
                 }

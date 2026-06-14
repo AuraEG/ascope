@@ -23,6 +23,7 @@ use syntect::{
 };
 
 use crate::app::AppState;
+use crate::fs::walker::EntryType;
 
 static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines);
 static THEME_SET: Lazy<ThemeSet> = Lazy::new(ThemeSet::load_defaults);
@@ -82,12 +83,19 @@ fn render_tree(f: &mut Frame, state: &AppState, area: Rect) {
     let items: Vec<ListItem> = window
         .iter()
         .enumerate()
-        .map(|(idx, (path, size, score))| {
+        .map(|(idx, (entry, score))| {
             let actual_idx = start_idx + idx;
+            let path = &entry.path;
+            let size = entry.size;
+            let entry_type = &entry.entry_type;
+            let mtime = entry.mtime;
             let raw_name = path.file_name().unwrap_or_default().to_string_lossy();
-            let name = sanitize_line(&raw_name);
+            let mut name = sanitize_line(&raw_name);
+            if let Some(target) = &entry.symlink_target {
+                name = format!("{} -> {}", name, target.display());
+            }
             #[allow(clippy::cast_precision_loss)]
-            let size_mb = *size as f64 / 1_000_000.0;
+            let size_mb = size as f64 / 1_000_000.0;
 
             let mut spans = Vec::new();
 
@@ -105,30 +113,53 @@ fn render_tree(f: &mut Frame, state: &AppState, area: Rect) {
                 .map(|r| r.components().count())
                 .unwrap_or(0);
 
-            let is_last = if actual_idx + 1 < total_items {
-                visible[actual_idx + 1].0.parent() != path.parent()
-            } else {
-                true
-            };
-
             let mut indent = String::new();
             if depth > 1 {
-                for i in 1..depth {
-                    if i == depth - 1 {
-                        if is_last {
-                            indent.push_str("  └── ");
-                        } else {
-                            indent.push_str("  ├── ");
+                if let Ok(path_comps) = path.strip_prefix(&state.current_path) {
+                    let path_comps: Vec<_> = path_comps.components().collect();
+                    for i in 1..depth {
+                        let mut ancestor_path = state.current_path.clone();
+                        for comp in path_comps.iter().take(i) {
+                            ancestor_path.push(comp);
                         }
-                    } else {
-                        indent.push_str("  │   ");
+                        let parent_path = ancestor_path.parent().unwrap();
+
+                        let has_later_sibling = window[idx + 1..].iter().any(|(next_entry, _)| {
+                            next_entry.path.starts_with(parent_path)
+                                && !next_entry.path.starts_with(&ancestor_path)
+                        });
+
+                        if i == depth - 1 {
+                            if has_later_sibling {
+                                indent.push_str("  ├── ");
+                            } else {
+                                indent.push_str("  └── ");
+                            }
+                        } else if has_later_sibling {
+                            indent.push_str("  │   ");
+                        } else {
+                            indent.push_str("      ");
+                        }
                     }
                 }
             } else if depth == 1 {
                 indent.push(' ');
             }
 
-            spans.push(Span::raw(format!("{indent}{name} ({size_mb:.2} MB)")));
+            spans.push(Span::raw(indent));
+
+            // Prefix with Nerd Font file type icon
+            let icon = get_icon(path, entry_type);
+            let icon_style = get_icon_style(path, entry_type);
+            spans.push(Span::styled(format!("{icon} "), icon_style));
+
+            spans.push(Span::raw(format!("{name} ({size_mb:.2} MB)")));
+
+            let mtime_str = format_system_time(mtime);
+            spans.push(Span::styled(
+                format!(" [{}]", mtime_str),
+                Style::default().fg(Color::DarkGray),
+            ));
 
             let item_style = if actual_idx == state.selected_index {
                 Style::default().fg(Color::Cyan).bg(Color::DarkGray)
@@ -152,8 +183,8 @@ fn render_tree(f: &mut Frame, state: &AppState, area: Rect) {
 // --------------------------------------------------------------------------
 
 fn render_right_pane(f: &mut Frame, state: &AppState, area: Rect) {
-    if let Some((path, _)) = state.selected_item() {
-        if path.is_file() {
+    if let Some(entry) = state.selected_item() {
+        if entry.entry_type == EntryType::File {
             render_file_preview(f, state, area);
             return;
         }
@@ -165,7 +196,7 @@ fn render_right_pane(f: &mut Frame, state: &AppState, area: Rect) {
 fn render_size_bars(f: &mut Frame, state: &AppState, area: Rect) {
     let visible = state.visible_items();
     // The largest entry anchors the scale so all bars are relative to it.
-    let max_size = visible.first().map(|x| x.1).unwrap_or(0).max(1);
+    let max_size = visible.first().map(|(e, _)| e.size).unwrap_or(0).max(1);
 
     let total_items = visible.len();
     let max_height = (area.height as usize).saturating_sub(2);
@@ -186,9 +217,10 @@ fn render_size_bars(f: &mut Frame, state: &AppState, area: Rect) {
 
     let items: Vec<ListItem> = window
         .iter()
-        .map(|(_, size, _)| {
+        .map(|(entry, _)| {
+            let size = entry.size;
             #[allow(clippy::cast_precision_loss)]
-            let ratio = (*size as f64 / max_size as f64).clamp(0.0, 1.0);
+            let ratio = (size as f64 / max_size as f64).clamp(0.0, 1.0);
             let filled = ((ratio * 20.0) as usize).min(20);
             let bar = format!("|{}{}|", "█".repeat(filled), "░".repeat(20 - filled));
             ListItem::new(bar).style(Style::default().fg(Color::LightCyan))
@@ -203,8 +235,9 @@ fn render_size_bars(f: &mut Frame, state: &AppState, area: Rect) {
 }
 
 fn render_file_preview(f: &mut Frame, state: &AppState, area: Rect) {
-    if let Some((path, _)) = state.selected_item() {
-        let title = path
+    if let Some(entry) = state.selected_item() {
+        let title = entry
+            .path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
@@ -399,6 +432,129 @@ fn sanitize_line(line: &str) -> String {
     sanitized
 }
 
+pub fn get_icon(path: &Path, entry_type: &EntryType) -> &'static str {
+    match entry_type {
+        EntryType::Directory => "󰉋",
+        EntryType::Symlink => "",
+        EntryType::File => {
+            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                match ext.to_lowercase().as_str() {
+                    "rs" => "󱘗",
+                    "js" | "mjs" | "cjs" => "",
+                    "jsx" => "",
+                    "ts" | "mts" | "cts" => "",
+                    "tsx" => "",
+                    "py" | "pyc" | "pyd" | "pyo" => "",
+                    "go" => "",
+                    "c" => "",
+                    "cpp" | "cc" | "cxx" => "",
+                    "h" | "hpp" => "",
+                    "swift" => "",
+                    "kt" | "kts" => "",
+                    "java" | "class" | "jar" => "",
+                    "scala" => "",
+                    "hs" | "lhs" => "",
+                    "zig" => "",
+                    "nim" => "",
+                    "ml" | "mli" => "",
+                    "d" => "",
+                    "rb" => "",
+                    "php" => "",
+                    "pl" | "pm" => "",
+                    "lua" => "",
+                    "wasm" | "wat" => "",
+                    "html" | "htm" => "",
+                    "css" => "",
+                    "scss" | "sass" => "",
+                    "less" => "",
+                    "elm" => "",
+                    "sh" | "bash" | "zsh" | "fish" | "ksh" => "",
+                    "ps1" | "psm1" => "",
+                    "toml" => "",
+                    "yml" | "yaml" => "",
+                    "json" => "",
+                    "xml" => "󰗀",
+                    "csv" | "tsv" => "󰈛",
+                    "sql" | "db" | "sqlite" => "",
+                    "graphql" | "gql" => "",
+                    "tf" | "tfvars" => "",
+                    "nix" => "",
+                    "md" | "markdown" => "",
+                    "pdf" => "",
+                    "txt" | "log" | "ini" | "conf" => "󰈙",
+                    "jpg" | "jpeg" | "png" | "gif" | "svg" | "webp" | "ico" | "bmp" | "tiff" => "󰸭",
+                    "zip" | "tar" | "gz" | "xz" | "bz2" | "7z" | "rar" => "󰿺",
+                    _ => "󰈔",
+                }
+            } else if let Some(filename) = path.file_name().and_then(|s| s.to_str()) {
+                match filename.to_lowercase().as_str() {
+                    "makefile" | "gemfile" | "rakefile" => "",
+                    "dockerfile" => "",
+                    "license" => "󰈙",
+                    _ => "󰈔",
+                }
+            } else {
+                "󰈔"
+            }
+        }
+    }
+}
+
+pub fn get_icon_style(path: &Path, entry_type: &EntryType) -> Style {
+    match entry_type {
+        EntryType::Directory => Style::default().fg(Color::LightBlue),
+        EntryType::Symlink => Style::default().fg(Color::LightMagenta),
+        EntryType::File => {
+            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                let color = match ext.to_lowercase().as_str() {
+                    "rs" => Color::Rgb(244, 91, 50),
+                    "js" | "mjs" | "cjs" | "py" | "rb" => Color::Yellow,
+                    "jsx" | "tsx" => Color::LightYellow,
+                    "ts" | "mts" | "cts" | "go" | "lua" => Color::Cyan,
+                    "c" | "cpp" | "cc" | "cxx" | "h" | "hpp" | "php" | "pl" | "pm" => Color::Blue,
+                    "swift" => Color::Rgb(250, 115, 50),
+                    "kt" | "kts" | "hs" | "lhs" | "tf" | "tfvars" => Color::Magenta,
+                    "java" | "class" | "jar" => Color::Rgb(220, 50, 50),
+                    "scala" => Color::Red,
+                    "zig" | "nim" => Color::Rgb(230, 160, 20),
+                    "ml" | "mli" => Color::Rgb(238, 90, 36),
+                    "d" => Color::Rgb(180, 50, 50),
+                    "html" | "htm" | "css" | "scss" | "sass" | "less" => Color::LightRed,
+                    "elm" => Color::LightCyan,
+                    "sh" | "bash" | "zsh" | "fish" | "ksh" | "ps1" | "psm1" => Color::LightGreen,
+                    "json" | "toml" | "yml" | "yaml" | "xml" => Color::Green,
+                    "csv" | "tsv" | "sql" | "db" | "sqlite" | "graphql" | "gql" => {
+                        Color::LightGreen
+                    }
+                    "nix" => Color::LightBlue,
+                    "md" | "markdown" | "txt" | "log" | "ini" | "conf" => Color::Gray,
+                    "pdf" => Color::Red,
+                    "jpg" | "jpeg" | "png" | "gif" | "svg" | "webp" | "ico" | "bmp" | "tiff" => {
+                        Color::LightMagenta
+                    }
+                    "zip" | "tar" | "gz" | "xz" | "bz2" | "7z" | "rar" => Color::Rgb(190, 150, 90),
+                    _ => Color::White,
+                };
+                Style::default().fg(color)
+            } else if let Some(filename) = path.file_name().and_then(|s| s.to_str()) {
+                match filename.to_lowercase().as_str() {
+                    "makefile" | "gemfile" | "rakefile" => Style::default().fg(Color::Yellow),
+                    "dockerfile" => Style::default().fg(Color::Cyan),
+                    "license" => Style::default().fg(Color::Gray),
+                    _ => Style::default().fg(Color::White),
+                }
+            } else {
+                Style::default().fg(Color::White)
+            }
+        }
+    }
+}
+
+pub fn format_system_time(time: std::time::SystemTime) -> String {
+    let datetime: chrono::DateTime<chrono::Local> = time.into();
+    datetime.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
 // --------------------------------------------------------------------------
 // [SECTION] Bottom Overlay -- Search Input
 // --------------------------------------------------------------------------
@@ -469,8 +625,13 @@ fn render_status_bar(f: &mut Frame, state: &AppState, area: Rect) {
     spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
 
     // 4. Sort Mode
+    let sort_label = match state.sort_mode {
+        crate::app::SortMode::SizeDesc => " sort: size↓ ",
+        crate::app::SortMode::NameAsc => " sort: name↑ ",
+        crate::app::SortMode::MtimeDesc => " sort: mtime↓ ",
+    };
     spans.push(Span::styled(
-        " sort: size↓ ",
+        sort_label,
         Style::default().fg(Color::Magenta),
     ));
     spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
@@ -540,5 +701,23 @@ mod tests {
 
         let line_with_ctrl = "hello\rworld\x1b[31m";
         assert_eq!(sanitize_line(line_with_ctrl), "hello world [31m");
+    }
+
+    #[test]
+    fn test_icon_lookup() {
+        let path_rs = Path::new("main.rs");
+        let icon_rs = get_icon(path_rs, &EntryType::File);
+        assert_eq!(icon_rs, "󱘗");
+
+        let path_dir = Path::new("src");
+        let icon_dir = get_icon(path_dir, &EntryType::Directory);
+        assert_eq!(icon_dir, "󰉋");
+    }
+
+    #[test]
+    fn test_time_formatting() {
+        let epoch = std::time::SystemTime::UNIX_EPOCH;
+        let formatted = format_system_time(epoch);
+        assert!(formatted.starts_with("1970") || formatted.starts_with("1969"));
     }
 }

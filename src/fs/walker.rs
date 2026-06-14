@@ -21,6 +21,23 @@ use serde::Serialize;
 // [SECTION] Public Types
 // --------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum EntryType {
+    File,
+    Directory,
+    Symlink,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DirEntry {
+    pub path: PathBuf,
+    pub size: u64,
+    pub entry_type: EntryType,
+    pub mtime: std::time::SystemTime,
+    pub display_path: String,
+    pub symlink_target: Option<PathBuf>,
+}
+
 /// Aggregated size statistics for a scanned directory tree.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PathStats {
@@ -30,8 +47,8 @@ pub struct PathStats {
     pub file_count: u64,
     /// Byte size attributed to each direct child directory.
     pub subdirs: HashMap<PathBuf, u64>,
-    /// All entries (path, size, display_path) scanned recursively under the root path.
-    pub all_entries: Vec<(PathBuf, u64, String)>,
+    /// All entries scanned recursively under the root path.
+    pub all_entries: Vec<DirEntry>,
 }
 
 // --------------------------------------------------------------------------
@@ -87,7 +104,7 @@ pub fn scan_path(root: &Path) -> Result<PathStats, std::io::Error> {
     let mut total_size: u64 = 0;
     let mut file_count: u64 = 0;
     let mut subdirs: HashMap<PathBuf, u64> = HashMap::new();
-    let mut all_entries: Vec<(PathBuf, u64, String)> = Vec::new();
+    let mut all_entries: Vec<DirEntry> = Vec::new();
 
     let mut temp_entries = Vec::new();
     let mut dir_sizes: HashMap<PathBuf, u64> = HashMap::new();
@@ -102,14 +119,34 @@ pub fn scan_path(root: &Path) -> Result<PathStats, std::io::Error> {
             continue;
         }
 
-        let is_file = entry.file_type().is_file();
-        let size = if is_file {
+        let file_type = entry.file_type();
+        let entry_type = if file_type.is_symlink() {
+            EntryType::Symlink
+        } else if file_type.is_dir() {
+            EntryType::Directory
+        } else {
+            EntryType::File
+        };
+
+        let size = if entry_type == EntryType::File {
             entry.metadata().map(|m| m.len()).unwrap_or(0)
         } else {
             0
         };
 
-        if is_file {
+        let metadata = std::fs::symlink_metadata(&path);
+        let mtime = metadata
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+
+        let symlink_target = if entry_type == EntryType::Symlink {
+            std::fs::read_link(&path).ok()
+        } else {
+            None
+        };
+
+        if entry_type == EntryType::File {
             total_size += size;
             file_count += 1;
 
@@ -124,23 +161,23 @@ pub fn scan_path(root: &Path) -> Result<PathStats, std::io::Error> {
             }
         }
 
-        temp_entries.push((path.to_path_buf(), is_file, size));
+        temp_entries.push((path.to_path_buf(), entry_type, size, mtime, symlink_target));
     }
 
     // Populate direct subdirectory sizes for `subdirs`
-    for (path, is_file, _) in &temp_entries {
-        if !is_file && path.parent() == Some(root) {
+    for (path, entry_type, _, _, _) in &temp_entries {
+        if *entry_type == EntryType::Directory && path.parent() == Some(root) {
             let size = *dir_sizes.get(path).unwrap_or(&0);
             subdirs.insert(path.clone(), size);
         }
     }
 
-    // Populate all_entries with actual sizes
-    for (path, is_file, size) in temp_entries {
-        let actual_size = if is_file {
-            size
-        } else {
+    // Populate all_entries with actual sizes and other details
+    for (path, entry_type, size, mtime, symlink_target) in temp_entries {
+        let actual_size = if entry_type == EntryType::Directory {
             *dir_sizes.get(&path).unwrap_or(&0)
+        } else {
+            size
         };
 
         let display_path = path
@@ -149,7 +186,14 @@ pub fn scan_path(root: &Path) -> Result<PathStats, std::io::Error> {
             .to_string_lossy()
             .into_owned();
 
-        all_entries.push((path, actual_size, display_path));
+        all_entries.push(DirEntry {
+            path,
+            size: actual_size,
+            entry_type,
+            mtime,
+            display_path,
+            symlink_target,
+        });
     }
 
     Ok(PathStats {
@@ -256,18 +300,10 @@ mod tests {
 
         let stats = scan_path(dir.path()).unwrap();
         // In all_entries, both pkg and pkg/src should have size 12
-        let pkg_entry = stats
-            .all_entries
-            .iter()
-            .find(|(p, _, _)| p == &sub)
-            .unwrap();
-        assert_eq!(pkg_entry.1, 12);
+        let pkg_entry = stats.all_entries.iter().find(|e| e.path == sub).unwrap();
+        assert_eq!(pkg_entry.size, 12);
 
-        let pkg_src_entry = stats
-            .all_entries
-            .iter()
-            .find(|(p, _, _)| p == &subsub)
-            .unwrap();
-        assert_eq!(pkg_src_entry.1, 12);
+        let pkg_src_entry = stats.all_entries.iter().find(|e| e.path == subsub).unwrap();
+        assert_eq!(pkg_src_entry.size, 12);
     }
 }
