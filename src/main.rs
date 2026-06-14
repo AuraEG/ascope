@@ -54,9 +54,25 @@ struct Args {
 // [SECTION] TUI Bootstrap
 // --------------------------------------------------------------------------
 
+fn teardown_terminal() {
+    let _ = disable_raw_mode();
+    let _ = execute!(
+        io::stdout(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        crossterm::cursor::Show
+    );
+}
+
 /// Configure the terminal for raw TUI mode, run the event loop, then
 /// unconditionally restore the terminal before returning to the caller.
 fn run_tui(root: PathBuf) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        teardown_terminal();
+        default_hook(info);
+    }));
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -66,13 +82,7 @@ fn run_tui(root: PathBuf) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let result = event_loop(&mut terminal, root);
 
     // Restore the terminal regardless of how the event loop exited.
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
+    teardown_terminal();
 
     result
 }
@@ -446,5 +456,44 @@ fn main() {
             }
             Err(e) => eprintln!("[x] TUI error: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_teardown_is_idempotent() {
+        teardown_terminal();
+        teardown_terminal();
+    }
+
+    #[test]
+    fn test_panic_teardown_restores_terminal() {
+        use std::sync::{Arc, Mutex};
+        let old_hook = Arc::new(Mutex::new(Some(std::panic::take_hook())));
+        let old_hook_clone = Arc::clone(&old_hook);
+        std::panic::set_hook(Box::new(move |info| {
+            teardown_terminal();
+            if let Some(ref hook) = *old_hook_clone.lock().unwrap() {
+                hook(info);
+            }
+        }));
+
+        let result = std::panic::catch_unwind(|| {
+            let _ = enable_raw_mode();
+            assert!(crossterm::terminal::is_raw_mode_enabled().unwrap());
+            panic!("test panic for terminal teardown");
+        });
+
+        // Restore old hook
+        let _ = std::panic::take_hook();
+        if let Some(hook) = old_hook.lock().unwrap().take() {
+            std::panic::set_hook(hook);
+        }
+
+        assert!(result.is_err());
+        assert!(!crossterm::terminal::is_raw_mode_enabled().unwrap());
     }
 }
