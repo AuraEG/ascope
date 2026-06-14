@@ -115,7 +115,43 @@ fn event_loop(
                         KeyCode::Char('/') => state.toggle_search_mode(),
                         KeyCode::Down | KeyCode::Char('j') => state.move_selection(1),
                         KeyCode::Up | KeyCode::Char('k') => state.move_selection(-1),
-                        KeyCode::Enter => state.navigate_in(),
+                        KeyCode::Enter => {
+                            if let Some((target, _)) = state.selected_item() {
+                                if target.is_dir() {
+                                    state.navigate_in();
+                                } else if target.is_file() {
+                                    disable_raw_mode()?;
+                                    execute!(
+                                        terminal.backend_mut(),
+                                        LeaveAlternateScreen,
+                                        DisableMouseCapture
+                                    )?;
+                                    terminal.show_cursor()?;
+
+                                    let editor = std::env::var("EDITOR")
+                                        .unwrap_or_else(|_| "nvim".to_string());
+                                    let mut cmd = std::process::Command::new(&editor);
+                                    if (editor.contains("nvim") || editor.contains("vim"))
+                                        && !state.search_query.is_empty()
+                                    {
+                                        cmd.arg(format!("+/{}", state.search_query));
+                                    }
+                                    cmd.arg(&target);
+
+                                    let mut child = cmd.spawn()?;
+                                    let _status = child.wait()?;
+
+                                    enable_raw_mode()?;
+                                    execute!(
+                                        terminal.backend_mut(),
+                                        EnterAlternateScreen,
+                                        EnableMouseCapture
+                                    )?;
+                                    terminal.hide_cursor()?;
+                                    terminal.clear()?;
+                                }
+                            }
+                        }
                         KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
                             if state.search_query.is_empty() {
                                 state.navigate_out();

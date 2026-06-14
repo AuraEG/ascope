@@ -62,21 +62,81 @@ pub fn render_dashboard(f: &mut Frame, state: &AppState) {
 
 fn render_tree(f: &mut Frame, state: &AppState, area: Rect) {
     let visible = state.visible_items();
-    let items: Vec<ListItem> = visible
+    let total_items = visible.len();
+    let max_height = (area.height as usize).saturating_sub(2);
+    let start_idx = if total_items <= max_height {
+        0
+    } else {
+        let half = max_height / 2;
+        if state.selected_index < half {
+            0
+        } else if state.selected_index >= total_items - half {
+            total_items - max_height
+        } else {
+            state.selected_index - half
+        }
+    };
+
+    let window = &visible[start_idx..total_items.min(start_idx + max_height)];
+
+    let items: Vec<ListItem> = window
         .iter()
         .enumerate()
-        .map(|(idx, (path, size))| {
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
+        .map(|(idx, (path, size, score))| {
+            let actual_idx = start_idx + idx;
+            let raw_name = path.file_name().unwrap_or_default().to_string_lossy();
+            let name = sanitize_line(&raw_name);
             #[allow(clippy::cast_precision_loss)]
-            let label = format!(" {name} ({:.2} MB)", *size as f64 / 1_000_000.0);
+            let size_mb = *size as f64 / 1_000_000.0;
 
-            // Selected row uses a contrasting pair so it remains legible on any theme.
-            let style = if idx == state.selected_index {
+            let mut spans = Vec::new();
+
+            // Render score badge if search is active
+            if !state.search_query.is_empty() && *score > 0 {
+                spans.push(Span::styled(
+                    format!(" [{score}]"),
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+
+            // Tree indentation and guides
+            let depth = path
+                .strip_prefix(&state.current_path)
+                .map(|r| r.components().count())
+                .unwrap_or(0);
+
+            let is_last = if actual_idx + 1 < total_items {
+                visible[actual_idx + 1].0.parent() != path.parent()
+            } else {
+                true
+            };
+
+            let mut indent = String::new();
+            if depth > 1 {
+                for i in 1..depth {
+                    if i == depth - 1 {
+                        if is_last {
+                            indent.push_str("  └── ");
+                        } else {
+                            indent.push_str("  ├── ");
+                        }
+                    } else {
+                        indent.push_str("  │   ");
+                    }
+                }
+            } else if depth == 1 {
+                indent.push(' ');
+            }
+
+            spans.push(Span::raw(format!("{indent}{name} ({size_mb:.2} MB)")));
+
+            let item_style = if actual_idx == state.selected_index {
                 Style::default().fg(Color::Cyan).bg(Color::DarkGray)
             } else {
                 Style::default().fg(Color::White)
             };
-            ListItem::new(label).style(style)
+
+            ListItem::new(Line::from(spans)).style(item_style)
         })
         .collect();
 
@@ -107,9 +167,26 @@ fn render_size_bars(f: &mut Frame, state: &AppState, area: Rect) {
     // The largest entry anchors the scale so all bars are relative to it.
     let max_size = visible.first().map(|x| x.1).unwrap_or(0).max(1);
 
-    let items: Vec<ListItem> = visible
+    let total_items = visible.len();
+    let max_height = (area.height as usize).saturating_sub(2);
+    let start_idx = if total_items <= max_height {
+        0
+    } else {
+        let half = max_height / 2;
+        if state.selected_index < half {
+            0
+        } else if state.selected_index >= total_items - half {
+            total_items - max_height
+        } else {
+            state.selected_index - half
+        }
+    };
+
+    let window = &visible[start_idx..total_items.min(start_idx + max_height)];
+
+    let items: Vec<ListItem> = window
         .iter()
-        .map(|(_, size)| {
+        .map(|(_, size, _)| {
             #[allow(clippy::cast_precision_loss)]
             let ratio = (*size as f64 / max_size as f64).clamp(0.0, 1.0);
             let filled = ((ratio * 20.0) as usize).min(20);
@@ -144,9 +221,9 @@ fn render_file_preview(f: &mut Frame, state: &AppState, area: Rect) {
     }
 }
 
-pub fn build_preview_lines(path: &Path) -> Vec<Line<'static>> {
-    match load_preview_source(path) {
-        Ok(source) => highlight_preview_source(path, &source),
+pub fn build_preview_lines(path: &Path, query: &str) -> Vec<Line<'static>> {
+    match load_preview_source(path, query) {
+        Ok((source, start_line)) => highlight_preview_source(path, &source, query, start_line),
         Err(error) => {
             if error.kind() == std::io::ErrorKind::InvalidData {
                 vec![Line::from("[Binary File - Preview Not Available]")]
@@ -157,22 +234,47 @@ pub fn build_preview_lines(path: &Path) -> Vec<Line<'static>> {
     }
 }
 
-fn load_preview_source(path: &Path) -> std::io::Result<String> {
+fn load_preview_source(path: &Path, query: &str) -> std::io::Result<(String, usize)> {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
     let file = File::open(path)?;
     let reader = BufReader::new(file);
-    let mut content = String::new();
+    let mut lines = Vec::new();
 
-    for line in reader.lines().take(100) {
-        content.push_str(&line?);
+    for line in reader.lines() {
+        lines.push(line?);
+    }
+
+    let mut match_line = 0;
+    if !query.is_empty() {
+        let q_lower = query.to_lowercase();
+        for (i, line) in lines.iter().enumerate() {
+            if line.to_lowercase().contains(&q_lower) {
+                match_line = i;
+                break;
+            }
+        }
+    }
+
+    let start = match_line.saturating_sub(15);
+    let end = (start + 100).min(lines.len());
+    let start = end.saturating_sub(100).min(start);
+
+    let mut content = String::new();
+    for line in &lines[start..end] {
+        content.push_str(line);
         content.push('\n');
     }
-    Ok(content)
+    Ok((content, start))
 }
 
-fn highlight_preview_source(path: &Path, source: &str) -> Vec<Line<'static>> {
+fn highlight_preview_source(
+    path: &Path,
+    source: &str,
+    query: &str,
+    start_line: usize,
+) -> Vec<Line<'static>> {
     let syntax = SYNTAX_SET
         .find_syntax_for_file(path)
         .ok()
@@ -185,17 +287,36 @@ fn highlight_preview_source(path: &Path, source: &str) -> Vec<Line<'static>> {
     let mut highlighter = HighlightLines::new(syntax, theme);
     let mut lines = Vec::new();
 
+    let mut line_num = start_line + 1;
     for line in source.split_inclusive('\n') {
-        match highlighter.highlight_line(line, &SYNTAX_SET) {
+        let clean_line = line.trim_end_matches(&['\r', '\n'][..]);
+        let sanitized = sanitize_line(clean_line);
+
+        let mut spans = vec![Span::styled(
+            format!("{:4} │ ", line_num),
+            Style::default().fg(Color::DarkGray),
+        )];
+
+        match highlighter.highlight_line(&sanitized, &SYNTAX_SET) {
             Ok(ranges) => {
-                let spans = ranges
-                    .into_iter()
-                    .map(|(style, text)| Span::styled(text.to_string(), to_ratatui_style(style)))
-                    .collect::<Vec<_>>();
-                lines.push(Line::from(spans));
+                for (style, text) in ranges {
+                    spans.extend(highlight_spans_with_query(
+                        text,
+                        to_ratatui_style(style),
+                        query,
+                    ));
+                }
             }
-            Err(_) => lines.push(Line::from(line.to_string())),
+            Err(_) => {
+                spans.extend(highlight_spans_with_query(
+                    &sanitized,
+                    Style::default(),
+                    query,
+                ));
+            }
         }
+        lines.push(Line::from(spans));
+        line_num += 1;
     }
 
     if lines.is_empty() {
@@ -203,6 +324,49 @@ fn highlight_preview_source(path: &Path, source: &str) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+fn highlight_spans_with_query(text: &str, style: Style, query: &str) -> Vec<Span<'static>> {
+    if query.is_empty() {
+        return vec![Span::styled(text.to_string(), style)];
+    }
+
+    let mut spans = Vec::new();
+    let q_len = query.len();
+    let q_lower = query.to_lowercase();
+    let text_lower = text.to_lowercase();
+
+    let mut last_idx = 0;
+    let mut search_idx = 0;
+
+    while let Some(idx) = text_lower[search_idx..].find(&q_lower) {
+        let absolute_idx = search_idx + idx;
+
+        if absolute_idx > last_idx {
+            spans.push(Span::styled(
+                text[last_idx..absolute_idx].to_string(),
+                style,
+            ));
+        }
+
+        let match_text = &text[absolute_idx..absolute_idx + q_len];
+        spans.push(Span::styled(
+            match_text.to_string(),
+            style
+                .bg(Color::Yellow)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+        last_idx = absolute_idx + q_len;
+        search_idx = last_idx;
+    }
+
+    if last_idx < text.len() {
+        spans.push(Span::styled(text[last_idx..].to_string(), style));
+    }
+
+    spans
 }
 
 fn to_ratatui_style(style: SyntectStyle) -> Style {
@@ -219,6 +383,22 @@ fn to_ratatui_style(style: SyntectStyle) -> Style {
         ))
 }
 
+/// Replaces tab characters with 4 spaces and strips or replaces other control
+/// characters (like \r, \x1b, backspaces) to prevent TUI screen corruption.
+fn sanitize_line(line: &str) -> String {
+    let mut sanitized = String::with_capacity(line.len());
+    for c in line.chars() {
+        if c == '\t' {
+            sanitized.push_str("    ");
+        } else if c.is_control() {
+            sanitized.push(' ');
+        } else {
+            sanitized.push(c);
+        }
+    }
+    sanitized
+}
+
 // --------------------------------------------------------------------------
 // [SECTION] Bottom Overlay -- Search Input
 // --------------------------------------------------------------------------
@@ -229,7 +409,17 @@ fn render_search_overlay(f: &mut Frame, state: &AppState, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
 
-    let prompt = Paragraph::new(format!("Search: {}", state.search_query)).block(block);
+    let matches_count = if state.search_query.is_empty() {
+        0
+    } else {
+        state.visible_items().len()
+    };
+
+    let prompt = Paragraph::new(format!(
+        "Search: {} ({} matches)",
+        state.search_query, matches_count
+    ))
+    .block(block);
     f.render_widget(Clear, area);
     f.render_widget(prompt, area);
 }
@@ -242,7 +432,8 @@ fn render_status_bar(f: &mut Frame, state: &AppState, area: Rect) {
     let mut spans = Vec::new();
 
     // 1. Current Path
-    let path = state.current_path.to_string_lossy();
+    let raw_path = state.current_path.to_string_lossy();
+    let path = sanitize_line(&raw_path);
     spans.push(Span::styled(
         format!(" {path} "),
         Style::default()
@@ -328,8 +519,9 @@ mod tests {
         let mut file = File::create(&file_path).unwrap();
         file.write_all(b"fn main() {}\n").unwrap();
 
-        let preview = load_preview_source(&file_path).unwrap();
+        let (preview, start_line) = load_preview_source(&file_path, "").unwrap();
         assert!(preview.contains("fn main() {}"));
+        assert_eq!(start_line, 0);
     }
 
     #[test]
@@ -339,5 +531,14 @@ mod tests {
 
         let theme = THEME_SET.themes.get("base16-ocean.dark");
         assert!(theme.is_some());
+    }
+
+    #[test]
+    fn test_sanitize_line_removes_control_chars_and_tabs() {
+        let line_with_tabs = "hello\tworld";
+        assert_eq!(sanitize_line(line_with_tabs), "hello    world");
+
+        let line_with_ctrl = "hello\rworld\x1b[31m";
+        assert_eq!(sanitize_line(line_with_ctrl), "hello world [31m");
     }
 }

@@ -9,19 +9,28 @@
 // Created : 2026-06-13
 // ==========================================================================
 
+use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use jwalk::WalkDir;
-
 use crate::fs::walker::{scan_path_async, PathStats, ScanProgress};
 use crate::git::GitContext;
+use nucleo::{
+    pattern::{CaseMatching, Normalization, Pattern},
+    Config, Matcher,
+};
 use ratatui::text::Line;
 
 // --------------------------------------------------------------------------
 // [SECTION] State
 // --------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct SearchCache {
+    query: String,
+    results: Vec<(PathBuf, u64, u32)>,
+}
 
 /// Central state passed to every render call and mutated by keyboard events.
 pub struct AppState {
@@ -33,6 +42,8 @@ pub struct AppState {
     scan_progress: Arc<Mutex<ScanProgress>>,
     /// Direct child directories sorted by size descending; drives the list.
     pub items: Vec<(PathBuf, u64)>,
+    /// All entries (path, size, display_path) scanned recursively under the root path.
+    pub all_entries: Vec<(PathBuf, u64, String)>,
     /// Index of the highlighted row in the currently visible item set.
     pub selected_index: usize,
     /// Whether the bottom search overlay is currently focused.
@@ -42,9 +53,11 @@ pub struct AppState {
     /// Flag indicating if the background scan results have already been applied to `items`.
     scan_applied: bool,
     /// Cache for the highlighted preview lines of the currently selected file.
-    preview_cache: Option<(PathBuf, Vec<Line<'static>>)>,
+    preview_cache: Option<(PathBuf, String, Vec<Line<'static>>)>,
     /// Git context (branch, dirty count) if inside a git repository.
     pub git_ctx: Option<GitContext>,
+    /// Memoized cache of the last query match results
+    search_cache: RefCell<Option<SearchCache>>,
 }
 
 // --------------------------------------------------------------------------
@@ -72,12 +85,14 @@ impl AppState {
             active_stats,
             scan_progress,
             items: Vec::new(),
+            all_entries: Vec::new(),
             selected_index: 0,
             search_mode: false,
             search_query: String::new(),
             scan_applied: false,
             preview_cache: None,
             git_ctx,
+            search_cache: RefCell::new(None),
         }
     }
 
@@ -124,6 +139,8 @@ impl AppState {
             let mut new_items: Vec<(PathBuf, u64)> = stats.subdirs.clone().into_iter().collect();
             // Largest directories first so the user immediately spots disk hogs.
             new_items.sort_by_key(|x| Reverse(x.1));
+            self.all_entries = stats.all_entries.clone();
+            *self.search_cache.borrow_mut() = None;
             drop(stats);
             self.items = new_items;
             self.scan_applied = true;
@@ -131,20 +148,20 @@ impl AppState {
     }
 
     /// Check if the currently highlighted item is a file and update the
-    /// preview cache if the selected file has changed.
+    /// preview cache if the selected file or search query has changed.
     pub fn update_preview_cache(&mut self) {
         let selected = self.selected_item().map(|x| x.0);
 
-        if let Some((cached_path, _)) = &self.preview_cache {
-            if Some(cached_path) == selected.as_ref() {
+        if let Some((cached_path, cached_query, _)) = &self.preview_cache {
+            if Some(cached_path) == selected.as_ref() && cached_query == &self.search_query {
                 return;
             }
         }
 
         if let Some(path) = selected {
             if path.is_file() {
-                let lines = crate::ui::widgets::build_preview_lines(&path);
-                self.preview_cache = Some((path, lines));
+                let lines = crate::ui::widgets::build_preview_lines(&path, &self.search_query);
+                self.preview_cache = Some((path, self.search_query.clone(), lines));
                 return;
             }
         }
@@ -154,7 +171,7 @@ impl AppState {
 
     /// Access the cached highlighted lines of the currently selected file.
     pub fn preview_lines(&self) -> &[Line<'static>] {
-        if let Some((_, lines)) = &self.preview_cache {
+        if let Some((_, _, lines)) = &self.preview_cache {
             lines
         } else {
             &[]
@@ -166,12 +183,26 @@ impl AppState {
     // ------------------------------------------------------------------
 
     /// Return the currently visible items, filtered when search is active.
-    pub fn visible_items(&self) -> Vec<(PathBuf, u64)> {
+    pub fn visible_items(&self) -> Vec<(PathBuf, u64, u32)> {
         if self.search_query.is_empty() {
-            self.items.clone()
-        } else {
-            self.filter_query(&self.search_query)
+            return self.items.iter().map(|(p, s)| (p.clone(), *s, 0)).collect();
         }
+
+        // Check if cached query matches current query
+        let mut cache = self.search_cache.borrow_mut();
+        if let Some(cached) = cache.as_ref() {
+            if cached.query == self.search_query {
+                return cached.results.clone();
+            }
+        }
+
+        // Cache miss: calculate matching items
+        let results = self.filter_query(&self.search_query);
+        *cache = Some(SearchCache {
+            query: self.search_query.clone(),
+            results: results.clone(),
+        });
+        results
     }
 
     /// Return the currently selected visible entry, if any.
@@ -181,7 +212,7 @@ impl AppState {
             return None;
         }
         let index = self.selected_index.min(visible.len() - 1);
-        visible.get(index).cloned()
+        visible.get(index).map(|(p, s, _)| (p.clone(), *s))
     }
 
     /// Descend into the currently selected sub-directory and rescan.
@@ -238,40 +269,51 @@ impl AppState {
         self.selected_index = 0;
     }
 
-    /// Case-insensitive substring match over files and directories inside the
-    /// active path. Search is recursive so file previews can be opened from the
-    /// live overlay without navigating into every intermediate directory.
-    pub fn filter_query(&self, query: &str) -> Vec<(PathBuf, u64)> {
-        let q = query.to_lowercase();
-        let mut matches = Vec::new();
+    /// Fuzzy match query over files and directories using the Nucleo matcher engine.
+    /// Returns a list of matches (PathBuf, size, score) ranked by score descending.
+    pub fn filter_query(&self, query: &str) -> Vec<(PathBuf, u64, u32)> {
+        if query.is_empty() {
+            return self
+                .all_entries
+                .iter()
+                .map(|(path, size, _)| (path.clone(), *size, 0))
+                .collect();
+        }
 
-        for entry in WalkDir::new(&self.current_path)
-            .skip_hidden(true)
-            .into_iter()
-            .filter_map(Result::ok)
-        {
-            let path = entry.path();
-            if path == self.current_path {
-                continue;
-            }
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
 
-            if path.to_string_lossy().to_lowercase().contains(&q) {
-                let size = entry
-                    .metadata()
-                    .map(|metadata| {
-                        if metadata.is_file() {
-                            metadata.len()
-                        } else {
-                            0
-                        }
-                    })
-                    .unwrap_or(0);
-                matches.push((path.to_path_buf(), size));
+        struct MatchItem<'a> {
+            path: &'a PathBuf,
+            size: u64,
+            display_path: &'a str,
+        }
+
+        impl<'a> AsRef<str> for MatchItem<'a> {
+            fn as_ref(&self) -> &str {
+                self.display_path
             }
         }
 
-        matches.sort_by(|a, b| a.0.cmp(&b.0));
+        let items: Vec<MatchItem> = self
+            .all_entries
+            .iter()
+            .map(|(path, size, display_path)| MatchItem {
+                path,
+                size: *size,
+                display_path,
+            })
+            .collect();
+
+        let mut matches = pattern.match_list(items, &mut matcher);
+
+        // Rank results by score descending, then by path alphabetically for stability
+        matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.path.cmp(b.0.path)));
+
         matches
+            .into_iter()
+            .map(|(item, score)| (item.path.clone(), item.size, score))
+            .collect()
     }
 }
 
@@ -436,7 +478,8 @@ mod tests {
         let mut file = File::create(&file_path).unwrap();
         file.write_all(b"fn main() {}\n").unwrap();
 
-        let state = AppState::new(dir.path().to_path_buf());
+        let mut state = AppState::new(dir.path().to_path_buf());
+        wait_for_scan(&mut state);
         let filtered = state.filter_query("main.rs");
 
         assert_eq!(filtered.len(), 1);
@@ -515,5 +558,53 @@ mod tests {
         state.items.clear();
         state.update_preview_cache();
         assert!(state.preview_lines().is_empty());
+    }
+
+    #[test]
+    fn test_fuzzy_matches_transpositions() {
+        let dir = tempdir().unwrap();
+        let main_path = dir.path().join("main.rs");
+        let cargo_path = dir.path().join("Cargo.toml");
+        File::create(&main_path).unwrap();
+        File::create(&cargo_path).unwrap();
+
+        let mut state = AppState::new(dir.path().to_path_buf());
+        wait_for_scan(&mut state);
+
+        let matches_mrs = state.filter_query("mrs");
+        assert_eq!(matches_mrs.len(), 1);
+        assert_eq!(matches_mrs[0].0, main_path);
+
+        let matches_crgo = state.filter_query("crgo");
+        assert_eq!(matches_crgo.len(), 1);
+        assert_eq!(matches_crgo[0].0, cargo_path);
+    }
+
+    #[test]
+    fn test_empty_query_returns_all() {
+        let dir = tempdir().unwrap();
+        let f1 = dir.path().join("a.rs");
+        let f2 = dir.path().join("b.rs");
+        File::create(&f1).unwrap();
+        File::create(&f2).unwrap();
+
+        let mut state = AppState::new(dir.path().to_path_buf());
+        wait_for_scan(&mut state);
+
+        let filtered = state.filter_query("");
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn test_no_match_returns_empty() {
+        let dir = tempdir().unwrap();
+        let f1 = dir.path().join("a.rs");
+        File::create(&f1).unwrap();
+
+        let mut state = AppState::new(dir.path().to_path_buf());
+        wait_for_scan(&mut state);
+
+        let filtered = state.filter_query("nonexistent");
+        assert!(filtered.is_empty());
     }
 }

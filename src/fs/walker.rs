@@ -30,6 +30,8 @@ pub struct PathStats {
     pub file_count: u64,
     /// Byte size attributed to each direct child directory.
     pub subdirs: HashMap<PathBuf, u64>,
+    /// All entries (path, size, display_path) scanned recursively under the root path.
+    pub all_entries: Vec<(PathBuf, u64, String)>,
 }
 
 // --------------------------------------------------------------------------
@@ -85,37 +87,76 @@ pub fn scan_path(root: &Path) -> Result<PathStats, std::io::Error> {
     let mut total_size: u64 = 0;
     let mut file_count: u64 = 0;
     let mut subdirs: HashMap<PathBuf, u64> = HashMap::new();
+    let mut all_entries: Vec<(PathBuf, u64, String)> = Vec::new();
+
+    let mut temp_entries = Vec::new();
+    let mut dir_sizes: HashMap<PathBuf, u64> = HashMap::new();
 
     for entry in WalkDir::new(root)
         .skip_hidden(true)
         .into_iter()
         .filter_map(Result::ok)
     {
-        // Only account for regular files; directories carry no payload size.
-        if entry.file_type().is_file() {
-            if let Ok(metadata) = entry.metadata() {
-                let size = metadata.len();
-                total_size += size;
-                file_count += 1;
+        let path = entry.path();
+        if path == root {
+            continue;
+        }
 
-                // Attribute this file's size to its direct child subdirectory
-                // so callers can rank top-level folders by disk usage.
-                if let Ok(relative) = entry.path().strip_prefix(root) {
-                    if let Some(first) = relative.components().next() {
-                        let child = root.join(first.as_os_str());
-                        if child.is_dir() {
-                            *subdirs.entry(child).or_insert(0) += size;
-                        }
-                    }
+        let is_file = entry.file_type().is_file();
+        let size = if is_file {
+            entry.metadata().map(|m| m.len()).unwrap_or(0)
+        } else {
+            0
+        };
+
+        if is_file {
+            total_size += size;
+            file_count += 1;
+
+            // Add size to all ancestor directories up to `root`
+            let mut parent = path.parent();
+            while let Some(p) = parent {
+                if !p.starts_with(root) || p == root {
+                    break;
                 }
+                *dir_sizes.entry(p.to_path_buf()).or_insert(0) += size;
+                parent = p.parent();
             }
         }
+
+        temp_entries.push((path.to_path_buf(), is_file, size));
+    }
+
+    // Populate direct subdirectory sizes for `subdirs`
+    for (path, is_file, _) in &temp_entries {
+        if !is_file && path.parent() == Some(root) {
+            let size = *dir_sizes.get(path).unwrap_or(&0);
+            subdirs.insert(path.clone(), size);
+        }
+    }
+
+    // Populate all_entries with actual sizes
+    for (path, is_file, size) in temp_entries {
+        let actual_size = if is_file {
+            size
+        } else {
+            *dir_sizes.get(&path).unwrap_or(&0)
+        };
+
+        let display_path = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+
+        all_entries.push((path, actual_size, display_path));
     }
 
     Ok(PathStats {
         total_size,
         file_count,
         subdirs,
+        all_entries,
     })
 }
 
@@ -200,5 +241,33 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert_eq!(stats.lock().unwrap().file_count, 1);
+    }
+
+    #[test]
+    fn test_recursive_directory_sizes_in_all_entries() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("pkg");
+        let subsub = sub.join("src");
+        std::fs::create_dir_all(&subsub).unwrap();
+        {
+            let mut f = File::create(subsub.join("lib.rs")).unwrap();
+            f.write_all(b"fn main() {}").unwrap(); // 12 bytes
+        }
+
+        let stats = scan_path(dir.path()).unwrap();
+        // In all_entries, both pkg and pkg/src should have size 12
+        let pkg_entry = stats
+            .all_entries
+            .iter()
+            .find(|(p, _, _)| p == &sub)
+            .unwrap();
+        assert_eq!(pkg_entry.1, 12);
+
+        let pkg_src_entry = stats
+            .all_entries
+            .iter()
+            .find(|(p, _, _)| p == &subsub)
+            .unwrap();
+        assert_eq!(pkg_src_entry.1, 12);
     }
 }
