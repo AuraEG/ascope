@@ -1,5 +1,6 @@
+#![allow(dead_code)]
+
 use crate::fs::walker::{DirEntry, EntryType};
-use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -19,12 +20,6 @@ pub enum NavigationAction {
     None,
 }
 
-#[derive(Clone, Default)]
-struct FilterCache {
-    query: String,
-    results: Vec<(usize, u32)>,
-}
-
 #[derive(Clone)]
 pub struct Navigation {
     items: Vec<DirEntry>,
@@ -32,7 +27,7 @@ pub struct Navigation {
     expanded: HashSet<PathBuf>,
     filter_query: Option<String>,
     sort_mode: crate::app::SortMode,
-    filter_cache: RefCell<FilterCache>,
+    filtered_items: Option<Vec<(DirEntry, u32)>>,
 }
 
 impl Navigation {
@@ -43,7 +38,7 @@ impl Navigation {
             expanded: HashSet::new(),
             filter_query: None,
             sort_mode,
-            filter_cache: RefCell::new(FilterCache::default()),
+            filtered_items: None,
         };
         nav.apply_sort();
         nav
@@ -106,26 +101,16 @@ impl Navigation {
     }
 
     pub fn visible_items(&self) -> Vec<&DirEntry> {
-        if self.filter_query.is_some() {
-            let cache = self.filter_cache.borrow();
-            cache
-                .results
-                .iter()
-                .filter_map(|(idx, _)| self.items.get(*idx))
-                .collect()
+        if let Some(ref filtered) = self.filtered_items {
+            filtered.iter().map(|(entry, _)| entry).collect()
         } else {
             self.items.iter().collect()
         }
     }
 
     pub fn visible_items_with_scores(&self) -> Vec<(&DirEntry, u32)> {
-        if self.filter_query.is_some() {
-            let cache = self.filter_cache.borrow();
-            cache
-                .results
-                .iter()
-                .filter_map(|&(idx, score)| self.items.get(idx).map(|entry| (entry, score)))
-                .collect()
+        if let Some(ref filtered) = self.filtered_items {
+            filtered.iter().map(|(entry, score)| (entry, *score)).collect()
         } else {
             self.items.iter().map(|entry| (entry, 0)).collect()
         }
@@ -181,7 +166,7 @@ impl Navigation {
         self.expanded.clear();
     }
 
-    pub fn set_filter(&mut self, query: Option<String>) {
+    pub fn set_filter(&mut self, query: Option<String>, all_entries: &[DirEntry]) {
         self.filter_query = query.clone();
 
         if let Some(q) = query {
@@ -194,21 +179,18 @@ impl Navigation {
             let pattern = Pattern::parse(&q, CaseMatching::Smart, Normalization::Smart);
 
             let mut results = Vec::new();
-            for (idx, item) in self.items.iter().enumerate() {
+            for item in all_entries {
                 let haystack = nucleo::Utf32String::from(item.display_path.as_str());
                 if let Some(score) = pattern.score(haystack.slice(..), &mut matcher) {
-                    results.push((idx, score as u32));
+                    results.push((item.clone(), score));
                 }
             }
             results.sort_by(|a, b| b.1.cmp(&a.1));
 
-            let mut cache = self.filter_cache.borrow_mut();
-            cache.query = q;
-            cache.results = results;
-
+            self.filtered_items = Some(results);
             self.cursor = 0;
         } else {
-            self.filter_cache.borrow_mut().results.clear();
+            self.filtered_items = None;
             self.cursor = 0;
         }
     }
@@ -234,7 +216,7 @@ impl Navigation {
         if self.cursor >= visible_count && visible_count > 0 {
             self.cursor = visible_count - 1;
         }
-        self.filter_cache.borrow_mut().results.clear();
+        self.filtered_items = None;
     }
 }
 
@@ -327,7 +309,8 @@ mod tests {
         ];
         let mut nav = Navigation::new(items, crate::app::SortMode::NameAsc);
         
-        nav.set_filter(Some("src".to_string()));
+        let all = nav.items.clone();
+        nav.set_filter(Some("src".to_string()), &all);
         assert_eq!(nav.visible_items().len(), 1);
         assert!(nav.visible_items()[0].display_path.contains("src"));
     }
@@ -340,10 +323,11 @@ mod tests {
         ];
         let mut nav = Navigation::new(items, crate::app::SortMode::NameAsc);
         
-        nav.set_filter(Some("src".to_string()));
+        let all = nav.items.clone();
+        nav.set_filter(Some("src".to_string()), &all);
         assert_eq!(nav.visible_items().len(), 1);
         
-        nav.set_filter(None);
+        nav.set_filter(None, &all);
         assert_eq!(nav.visible_items().len(), 2);
     }
 
@@ -393,7 +377,7 @@ mod tests {
             mock_entry_sized("small", 10),
             mock_entry_sized("medium", 500),
         ];
-        let mut nav = Navigation::new(items, crate::app::SortMode::SizeDesc);
+        let nav = Navigation::new(items, crate::app::SortMode::SizeDesc);
         
         let visible = nav.visible_items();
         assert_eq!(visible[0].size, 1000);

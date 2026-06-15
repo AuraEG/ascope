@@ -446,7 +446,7 @@ fn render_tree(f: &mut Frame, state: &AppState, area: Rect) {
             }
 
             // Render score badge if search is active
-            if state.navigation.filter_query().map_or(false, |q| !q.is_empty()) && *score > 0 {
+            if state.navigation.filter_query().is_some_and(|q| !q.is_empty()) && *score > 0 {
                 spans.push(Span::styled(
                     format!(" [{score}]"),
                     Style::default().fg(Color::Yellow),
