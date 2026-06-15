@@ -320,12 +320,12 @@ fn event_loop(
                             _ => {}
                         }
                     }
-                } else if state.search_mode {
+                else if state.search_mode {
                     match key.code {
                         KeyCode::Esc => state.toggle_search_mode(),
                         KeyCode::Enter => state.toggle_search_mode(),
                         KeyCode::Backspace => state.pop_search_char(),
-                        KeyCode::Char('/') if state.search_query.is_empty() => {
+                        KeyCode::Char('/') if state.navigation.filter_query().unwrap_or("").is_empty() => {
                             state.toggle_search_mode();
                         }
                         KeyCode::Char(c) => state.push_search_char(c),
@@ -353,10 +353,11 @@ fn event_loop(
                                     let editor = std::env::var("EDITOR")
                                         .unwrap_or_else(|_| "nvim".to_string());
                                     let mut cmd = std::process::Command::new(&editor);
+                                    let query = state.navigation.filter_query().unwrap_or("");
                                     if (editor.contains("nvim") || editor.contains("vim"))
-                                        && !state.search_query.is_empty()
+                                        && !query.is_empty()
                                     {
-                                        cmd.arg(format!("+/{}", state.search_query));
+                                        cmd.arg(format!("+/{}", query));
                                     }
                                     cmd.arg(&target.path);
 
@@ -375,7 +376,7 @@ fn event_loop(
                             }
                         }
                         KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
-                            if state.search_query.is_empty() {
+                            if state.navigation.filter_query().unwrap_or("").is_empty() {
                                 state.navigate_out();
                             } else {
                                 state.clear_search();

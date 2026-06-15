@@ -25,6 +25,7 @@ struct FilterCache {
     results: Vec<(usize, u32)>,
 }
 
+#[derive(Clone)]
 pub struct Navigation {
     items: Vec<DirEntry>,
     cursor: usize,
@@ -95,6 +96,15 @@ impl Navigation {
         NavigationAction::None
     }
 
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    pub fn set_cursor(&mut self, cursor: usize) {
+        let max_idx = self.visible_items().len().saturating_sub(1);
+        self.cursor = cursor.min(max_idx);
+    }
+
     pub fn visible_items(&self) -> Vec<&DirEntry> {
         if self.filter_query.is_some() {
             let cache = self.filter_cache.borrow();
@@ -105,6 +115,19 @@ impl Navigation {
                 .collect()
         } else {
             self.items.iter().collect()
+        }
+    }
+
+    pub fn visible_items_with_scores(&self) -> Vec<(&DirEntry, u32)> {
+        if self.filter_query.is_some() {
+            let cache = self.filter_cache.borrow();
+            cache
+                .results
+                .iter()
+                .filter_map(|&(idx, score)| self.items.get(idx).map(|entry| (entry, score)))
+                .collect()
+        } else {
+            self.items.iter().map(|entry| (entry, 0)).collect()
         }
     }
 
@@ -152,6 +175,10 @@ impl Navigation {
 
     pub fn is_expanded(&self, path: &Path) -> bool {
         self.expanded.contains(path)
+    }
+
+    pub fn clear_expanded(&mut self) {
+        self.expanded.clear();
     }
 
     pub fn set_filter(&mut self, query: Option<String>) {
