@@ -110,7 +110,10 @@ impl Navigation {
 
     pub fn visible_items_with_scores(&self) -> Vec<(&DirEntry, u32)> {
         if let Some(ref filtered) = self.filtered_items {
-            filtered.iter().map(|(entry, score)| (entry, *score)).collect()
+            filtered
+                .iter()
+                .map(|(entry, score)| (entry, *score))
+                .collect()
         } else {
             self.items.iter().map(|entry| (entry, 0)).collect()
         }
@@ -220,7 +223,6 @@ impl Navigation {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,7 +265,7 @@ mod tests {
     fn test_cursor_moves_down() {
         let items = vec![mock_entry("a"), mock_entry("b"), mock_entry("c")];
         let mut nav = Navigation::new(items, crate::app::SortMode::NameAsc);
-        
+
         nav.move_cursor(Direction::Down);
         assert_eq!(nav.cursor, 1);
     }
@@ -273,7 +275,7 @@ mod tests {
         let items = vec![mock_entry("a"), mock_entry("b")];
         let mut nav = Navigation::new(items, crate::app::SortMode::NameAsc);
         nav.cursor = 1;
-        
+
         nav.move_cursor(Direction::Down);
         assert_eq!(nav.cursor, 1);
     }
@@ -283,7 +285,7 @@ mod tests {
         let items = vec![mock_entry("a"), mock_entry("b"), mock_entry("c")];
         let mut nav = Navigation::new(items, crate::app::SortMode::NameAsc);
         nav.cursor = 2;
-        
+
         nav.move_cursor(Direction::Up);
         assert_eq!(nav.cursor, 1);
     }
@@ -292,10 +294,10 @@ mod tests {
     fn test_cursor_first_last() {
         let items = vec![mock_entry("a"), mock_entry("b"), mock_entry("c")];
         let mut nav = Navigation::new(items, crate::app::SortMode::NameAsc);
-        
+
         nav.move_cursor(Direction::Last);
         assert_eq!(nav.cursor, 2);
-        
+
         nav.move_cursor(Direction::First);
         assert_eq!(nav.cursor, 0);
     }
@@ -308,7 +310,7 @@ mod tests {
             mock_entry("README.md"),
         ];
         let mut nav = Navigation::new(items, crate::app::SortMode::NameAsc);
-        
+
         let all = nav.items.clone();
         nav.set_filter(Some("src".to_string()), &all);
         assert_eq!(nav.visible_items().len(), 1);
@@ -317,16 +319,13 @@ mod tests {
 
     #[test]
     fn test_clear_filter_shows_all() {
-        let items = vec![
-            mock_entry("src/main.rs"),
-            mock_entry("tests/test.rs"),
-        ];
+        let items = vec![mock_entry("src/main.rs"), mock_entry("tests/test.rs")];
         let mut nav = Navigation::new(items, crate::app::SortMode::NameAsc);
-        
+
         let all = nav.items.clone();
         nav.set_filter(Some("src".to_string()), &all);
         assert_eq!(nav.visible_items().len(), 1);
-        
+
         nav.set_filter(None, &all);
         assert_eq!(nav.visible_items().len(), 2);
     }
@@ -335,7 +334,7 @@ mod tests {
     fn test_enter_directory_returns_action() {
         let items = vec![mock_dir_entry("subdir")];
         let mut nav = Navigation::new(items, crate::app::SortMode::NameAsc);
-        
+
         let action = nav.enter_selected();
         match action {
             NavigationAction::EnterDirectory(path) => assert!(path.ends_with("subdir")),
@@ -347,7 +346,7 @@ mod tests {
     fn test_enter_file_returns_action() {
         let items = vec![mock_entry("file.txt")];
         let mut nav = Navigation::new(items, crate::app::SortMode::NameAsc);
-        
+
         let action = nav.enter_selected();
         match action {
             NavigationAction::OpenFile(path) => assert!(path.ends_with("file.txt")),
@@ -359,13 +358,13 @@ mod tests {
     fn test_toggle_expansion() {
         let items = vec![mock_dir_entry("subdir")];
         let mut nav = Navigation::new(items, crate::app::SortMode::NameAsc);
-        
+
         let path = PathBuf::from("subdir");
         assert!(!nav.is_expanded(&path));
-        
+
         nav.toggle_expand_selected();
         assert!(nav.is_expanded(&path));
-        
+
         nav.toggle_expand_selected();
         assert!(!nav.is_expanded(&path));
     }
@@ -378,7 +377,7 @@ mod tests {
             mock_entry_sized("medium", 500),
         ];
         let nav = Navigation::new(items, crate::app::SortMode::SizeDesc);
-        
+
         let visible = nav.visible_items();
         assert_eq!(visible[0].size, 1000);
         assert_eq!(visible[1].size, 500);
