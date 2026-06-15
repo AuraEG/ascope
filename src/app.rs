@@ -9,16 +9,11 @@
 // Created : 2026-06-13
 // ==========================================================================
 
-use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::fs::walker::{scan_path_async, PathStats, ScanProgress};
 use crate::git::GitContext;
-use nucleo::{
-    pattern::{CaseMatching, Normalization, Pattern},
-    Config, Matcher,
-};
 use ratatui::text::Line;
 
 // --------------------------------------------------------------------------
@@ -43,61 +38,29 @@ pub enum ModalMode {
 
 use crate::fs::walker::{DirEntry, EntryType};
 
-#[derive(Clone)]
-pub(crate) struct SearchCache {
-    query: String,
-    results: Vec<(DirEntry, u32)>,
-}
-
 /// Represents a single directory view tab with its own navigation history and search query.
 pub struct Tab {
     pub current_path: PathBuf,
     pub active_stats: Arc<Mutex<PathStats>>,
     pub scan_progress: Arc<Mutex<ScanProgress>>,
-    pub items: Vec<DirEntry>,
+    pub navigation: crate::navigation::Navigation,
     pub all_entries: Vec<DirEntry>,
-    pub selected_index: usize,
-    pub search_mode: bool,
-    pub search_query: String,
     pub scan_applied: bool,
     pub preview_cache: Option<(PathBuf, String, Vec<Line<'static>>)>,
     pub git_ctx: Option<GitContext>,
-    pub search_cache: RefCell<Option<SearchCache>>,
-    pub sort_mode: SortMode,
-    pub expanded_paths: std::collections::HashSet<PathBuf>,
 }
 
 /// Central state passed to every render call and mutated by keyboard events.
 pub struct AppState {
-    /// Directory currently displayed in the tree pane.
     pub current_path: PathBuf,
-    /// Aggregated scan results for `current_path` (shared with scanner thread).
     active_stats: Arc<Mutex<PathStats>>,
-    /// Lifecycle of the background scan for `current_path`.
     scan_progress: Arc<Mutex<ScanProgress>>,
-    /// Direct child directories sorted by size descending; drives the list.
-    pub items: Vec<DirEntry>,
-    /// All entries scanned recursively under the root path.
+    pub navigation: crate::navigation::Navigation,
     pub all_entries: Vec<DirEntry>,
-    /// Index of the highlighted row in the currently visible item set.
-    pub selected_index: usize,
-    /// Whether the bottom search overlay is currently focused.
-    pub search_mode: bool,
-    /// Current live substring query used to filter visible rows.
-    pub search_query: String,
-    /// Flag indicating if the background scan results have already been applied to `items`.
     scan_applied: bool,
-    /// Cache for the highlighted preview lines of the currently selected file.
     preview_cache: Option<(PathBuf, String, Vec<Line<'static>>)>,
-    /// Git context (branch, dirty count) if inside a git repository.
     pub git_ctx: Option<GitContext>,
-    /// Memoized cache of the last query match results
-    search_cache: RefCell<Option<SearchCache>>,
-    /// Active sorting mode
-    pub sort_mode: SortMode,
-    /// Paths that are currently expanded in the tree view
-    pub expanded_paths: std::collections::HashSet<PathBuf>,
-    /// All open tabs
+    pub search_mode: bool,
     pub tabs: Vec<Tab>,
     /// Index of the active tab
     pub active_tab: usize,
@@ -172,34 +135,23 @@ impl AppState {
             current_path: root.clone(),
             active_stats: Arc::clone(&active_stats),
             scan_progress: Arc::clone(&scan_progress),
-            items: Vec::new(),
+            navigation: crate::navigation::Navigation::new(Vec::new(), SortMode::SizeDesc),
             all_entries: Vec::new(),
-            selected_index: 0,
-            search_mode: false,
-            search_query: String::new(),
             scan_applied: false,
             preview_cache: None,
             git_ctx: git_ctx.clone(),
-            search_cache: RefCell::new(None),
-            sort_mode: SortMode::SizeDesc,
-            expanded_paths: std::collections::HashSet::new(),
         };
 
         Self {
             current_path: root,
             active_stats,
             scan_progress,
-            items: Vec::new(),
+            navigation: crate::navigation::Navigation::new(Vec::new(), SortMode::SizeDesc),
             all_entries: Vec::new(),
-            selected_index: 0,
-            search_mode: false,
-            search_query: String::new(),
             scan_applied: false,
             preview_cache: None,
             git_ctx,
-            search_cache: RefCell::new(None),
-            sort_mode: SortMode::SizeDesc,
-            expanded_paths: std::collections::HashSet::new(),
+            search_mode: false,
             tabs: vec![initial_tab],
             active_tab: 0,
             config,
@@ -269,61 +221,44 @@ impl AppState {
                 .cloned()
                 .collect();
             self.all_entries = stats.all_entries.clone();
-            *self.search_cache.borrow_mut() = None;
             drop(stats);
-            self.items = new_items;
-            self.sort_items();
-            self.scan_applied = true;
-        }
-    }
 
-    /// Sort items based on the active sort mode.
-    pub fn sort_items(&mut self) {
-        match self.sort_mode {
-            SortMode::SizeDesc => {
-                self.items
-                    .sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
-            }
-            SortMode::NameAsc => {
-                self.items.sort_by(|a, b| {
-                    let name_a = a.path.file_name().unwrap_or_default();
-                    let name_b = b.path.file_name().unwrap_or_default();
-                    name_a.cmp(name_b)
-                });
-            }
-            SortMode::MtimeDesc => {
-                self.items
-                    .sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.path.cmp(&b.path)));
+            // Use Navigation to update items (handles sorting automatically)
+            self.navigation.update_items(new_items);
+            self.scan_applied = true;
+
+            if let Some(query) = self.navigation.filter_query().map(String::from) {
+                self.navigation.set_filter(Some(query), &self.all_entries);
             }
         }
     }
 
     /// Cycle through size -> name -> modification time sorting modes.
     pub fn cycle_sort_mode(&mut self) {
-        self.sort_mode = match self.sort_mode {
+        let next_mode = match self.navigation.sort_mode() {
             SortMode::SizeDesc => SortMode::NameAsc,
             SortMode::NameAsc => SortMode::MtimeDesc,
             SortMode::MtimeDesc => SortMode::SizeDesc,
         };
-        self.sort_items();
-        self.selected_index = 0;
+        self.navigation.set_sort_mode(next_mode);
     }
 
     /// Check if the currently highlighted item is a file and update the
     /// preview cache if the selected file or search query has changed.
     pub fn update_preview_cache(&mut self) {
         let selected = self.selected_item().map(|x| x.path);
+        let query = self.navigation.filter_query().unwrap_or("").to_string();
 
         if let Some((cached_path, cached_query, _)) = &self.preview_cache {
-            if Some(cached_path) == selected.as_ref() && cached_query == &self.search_query {
+            if Some(cached_path) == selected.as_ref() && cached_query == &query {
                 return;
             }
         }
 
         if let Some(path) = selected {
             if path.is_file() {
-                let lines = crate::ui::widgets::build_preview_lines(&path, &self.search_query);
-                self.preview_cache = Some((path, self.search_query.clone(), lines));
+                let lines = crate::ui::widgets::build_preview_lines(&path, &query);
+                self.preview_cache = Some((path, query, lines));
                 return;
             }
         }
@@ -346,53 +281,25 @@ impl AppState {
 
     /// Return the currently visible items, filtered when search is active.
     pub fn visible_items(&self) -> Vec<(DirEntry, u32)> {
-        if self.search_query.is_empty() {
+        if self.navigation.filter_query().is_none() {
             return self.build_expanded_tree();
         }
 
-        // Check if cached query matches current query
-        let mut cache = self.search_cache.borrow_mut();
-        if let Some(cached) = cache.as_ref() {
-            if cached.query == self.search_query {
-                return cached.results.clone();
-            }
-        }
-
-        // Cache miss: calculate matching items
-        let results = self.filter_query(&self.search_query);
-        *cache = Some(SearchCache {
-            query: self.search_query.clone(),
-            results: results.clone(),
-        });
-        results
+        self.navigation
+            .visible_items_with_scores()
+            .into_iter()
+            .map(|(entry, score)| (entry.clone(), score))
+            .collect()
     }
 
     /// Return the currently selected visible entry, if any.
     pub fn selected_item(&self) -> Option<DirEntry> {
-        let visible = self.visible_items();
-        if visible.is_empty() {
-            return None;
-        }
-        let index = self.selected_index.min(visible.len() - 1);
-        visible.get(index).map(|(e, _)| e.clone())
+        self.navigation.current_selection().cloned()
     }
 
     /// Toggle the expansion state of the currently selected directory.
     pub fn toggle_expand(&mut self) {
-        if let Some(entry) = self.selected_item() {
-            if entry.entry_type == EntryType::Directory {
-                if self.expanded_paths.contains(&entry.path) {
-                    self.expanded_paths.remove(&entry.path);
-                } else {
-                    self.expanded_paths.insert(entry.path.clone());
-                }
-                // Clamp selected_index to the new visible bounds
-                let len = self.visible_items().len();
-                if len > 0 && self.selected_index >= len {
-                    self.selected_index = len - 1;
-                }
-            }
-        }
+        self.navigation.toggle_expand_selected();
     }
 
     fn get_children(&self, parent_path: &std::path::Path) -> Vec<DirEntry> {
@@ -404,7 +311,7 @@ impl AppState {
             .collect();
 
         // Sort children using the active sorting mode
-        match self.sort_mode {
+        match self.navigation.sort_mode() {
             SortMode::SizeDesc => {
                 children.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
             }
@@ -424,13 +331,18 @@ impl AppState {
 
     fn build_expanded_tree(&self) -> Vec<(DirEntry, u32)> {
         let mut result = Vec::new();
-        // Start with top-level items (which are already sorted in self.items)
-        let mut stack: Vec<(DirEntry, usize)> =
-            self.items.iter().rev().map(|e| (e.clone(), 0)).collect();
+        // Start with top-level items from Navigation (which are already sorted)
+        let mut stack: Vec<(DirEntry, usize)> = self
+            .navigation
+            .visible_items()
+            .iter()
+            .rev()
+            .map(|&e| (e.clone(), 0))
+            .collect();
 
         while let Some((entry, depth)) = stack.pop() {
             result.push((entry.clone(), 0));
-            if entry.entry_type == EntryType::Directory && self.expanded_paths.contains(&entry.path)
+            if entry.entry_type == EntryType::Directory && self.navigation.is_expanded(&entry.path)
             {
                 // Get children of this directory, sorted in reverse order so that when popped from stack they come out in correct order
                 let mut children = self.get_children(&entry.path);
@@ -462,16 +374,14 @@ impl AppState {
                 self.current_path = path.clone();
                 self.active_stats = active_stats;
                 self.scan_progress = scan_progress;
-                self.items = Vec::new();
+                self.navigation.update_items(Vec::new());
+                self.navigation.set_cursor(0);
+                self.navigation.clear_expanded();
+                self.navigation.set_filter(None, &[]);
                 self.all_entries = Vec::new();
-                self.selected_index = 0;
-                self.search_mode = false;
-                self.search_query = String::new();
                 self.scan_applied = false;
                 self.preview_cache = None;
                 self.git_ctx = git_ctx;
-                *self.search_cache.borrow_mut() = None;
-                self.expanded_paths = std::collections::HashSet::new();
 
                 self.record_navigation(path);
                 self.save_active_tab();
@@ -497,16 +407,14 @@ impl AppState {
             self.current_path = path.clone();
             self.active_stats = active_stats;
             self.scan_progress = scan_progress;
-            self.items = Vec::new();
+            self.navigation.update_items(Vec::new());
+            self.navigation.set_cursor(0);
+            self.navigation.clear_expanded();
+            self.navigation.set_filter(None, &[]);
             self.all_entries = Vec::new();
-            self.selected_index = 0;
-            self.search_mode = false;
-            self.search_query = String::new();
             self.scan_applied = false;
             self.preview_cache = None;
             self.git_ctx = git_ctx;
-            *self.search_cache.borrow_mut() = None;
-            self.expanded_paths = std::collections::HashSet::new();
 
             self.record_navigation(path);
             self.save_active_tab();
@@ -520,17 +428,11 @@ impl AppState {
                 current_path: self.current_path.clone(),
                 active_stats: Arc::clone(&self.active_stats),
                 scan_progress: Arc::clone(&self.scan_progress),
-                items: self.items.clone(),
+                navigation: self.navigation.clone(),
                 all_entries: self.all_entries.clone(),
-                selected_index: self.selected_index,
-                search_mode: self.search_mode,
-                search_query: self.search_query.clone(),
                 scan_applied: self.scan_applied,
                 preview_cache: self.preview_cache.clone(),
                 git_ctx: self.git_ctx.clone(),
-                search_cache: RefCell::new(self.search_cache.borrow().clone()),
-                sort_mode: self.sort_mode,
-                expanded_paths: self.expanded_paths.clone(),
             };
         }
     }
@@ -542,17 +444,11 @@ impl AppState {
             self.current_path = tab.current_path.clone();
             self.active_stats = Arc::clone(&tab.active_stats);
             self.scan_progress = Arc::clone(&tab.scan_progress);
-            self.items = tab.items.clone();
+            self.navigation = tab.navigation.clone();
             self.all_entries = tab.all_entries.clone();
-            self.selected_index = tab.selected_index;
-            self.search_mode = tab.search_mode;
-            self.search_query = tab.search_query.clone();
             self.scan_applied = tab.scan_applied;
             self.preview_cache = tab.preview_cache.clone();
             self.git_ctx = tab.git_ctx.clone();
-            self.search_cache = tab.search_cache.clone();
-            self.sort_mode = tab.sort_mode;
-            self.expanded_paths = tab.expanded_paths.clone();
             self.active_tab = index;
         }
     }
@@ -576,17 +472,11 @@ impl AppState {
             current_path: path,
             active_stats,
             scan_progress,
-            items: Vec::new(),
+            navigation: crate::navigation::Navigation::new(Vec::new(), SortMode::SizeDesc),
             all_entries: Vec::new(),
-            selected_index: 0,
-            search_mode: false,
-            search_query: String::new(),
             scan_applied: false,
             preview_cache: None,
             git_ctx,
-            search_cache: RefCell::new(None),
-            sort_mode: self.sort_mode,
-            expanded_paths: std::collections::HashSet::new(),
         };
 
         self.tabs.push(new_tab);
@@ -710,16 +600,14 @@ impl AppState {
         self.current_path = path.clone();
         self.active_stats = active_stats;
         self.scan_progress = scan_progress;
-        self.items = Vec::new();
+        self.navigation.update_items(Vec::new());
+        self.navigation.set_cursor(0);
+        self.navigation.clear_expanded();
+        self.navigation.set_filter(None, &[]);
         self.all_entries = Vec::new();
-        self.selected_index = 0;
-        self.search_mode = false;
-        self.search_query = String::new();
         self.scan_applied = false;
         self.preview_cache = None;
         self.git_ctx = git_ctx;
-        *self.search_cache.borrow_mut() = None;
-        self.expanded_paths = std::collections::HashSet::new();
 
         self.record_navigation(path);
         self.save_active_tab();
@@ -1074,12 +962,14 @@ impl AppState {
         if len == 0 {
             return;
         }
-        let idx = (self.selected_index as isize + delta) % len as isize;
-        self.selected_index = if idx < 0 {
+        let current = self.navigation.cursor();
+        let idx = (current as isize + delta) % len as isize;
+        let new_idx = if idx < 0 {
             (idx + len as isize) as usize
         } else {
             idx as usize
         };
+        self.navigation.set_cursor(new_idx);
     }
 
     /// Toggle search-mode focus. Leaving search mode preserves the query so the
@@ -1090,63 +980,25 @@ impl AppState {
 
     /// Clear the active query and reset the cursor to the first visible row.
     pub fn clear_search(&mut self) {
-        self.search_query.clear();
-        self.selected_index = 0;
+        self.navigation.set_filter(None, &self.all_entries);
     }
 
     /// Append one typed character to the live query.
     pub fn push_search_char(&mut self, ch: char) {
-        self.search_query.push(ch);
-        self.selected_index = 0;
+        let mut query = self.navigation.filter_query().unwrap_or("").to_string();
+        query.push(ch);
+        self.navigation.set_filter(Some(query), &self.all_entries);
     }
 
     /// Delete the most recent search character.
     pub fn pop_search_char(&mut self) {
-        self.search_query.pop();
-        self.selected_index = 0;
-    }
-
-    /// Fuzzy match query over files and directories using the Nucleo matcher engine.
-    pub fn filter_query(&self, query: &str) -> Vec<(DirEntry, u32)> {
+        let mut query = self.navigation.filter_query().unwrap_or("").to_string();
+        query.pop();
         if query.is_empty() {
-            return self
-                .all_entries
-                .iter()
-                .map(|entry| (entry.clone(), 0))
-                .collect();
+            self.navigation.set_filter(None, &self.all_entries);
+        } else {
+            self.navigation.set_filter(Some(query), &self.all_entries);
         }
-
-        let mut matcher = Matcher::new(Config::DEFAULT);
-        let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
-
-        struct MatchItem<'a> {
-            entry: &'a DirEntry,
-        }
-
-        impl<'a> AsRef<str> for MatchItem<'a> {
-            fn as_ref(&self) -> &str {
-                &self.entry.display_path
-            }
-        }
-
-        let items: Vec<MatchItem> = self
-            .all_entries
-            .iter()
-            .map(|entry| MatchItem { entry })
-            .collect();
-
-        let mut matches = pattern.match_list(items, &mut matcher);
-
-        // Rank results by score descending, then by path alphabetically for stability
-        matches.sort_by(|a, b| {
-            b.1.cmp(&a.1)
-                .then_with(|| a.0.entry.path.cmp(&b.0.entry.path))
-        });
-
-        matches
-            .into_iter()
-            .map(|(item, score)| (item.entry.clone(), score))
-            .collect()
     }
 }
 
@@ -1200,36 +1052,36 @@ mod tests {
     #[test]
     fn test_new_state_has_items() {
         let (state, _dir) = make_state_with_subdirs();
-        assert_eq!(state.items.len(), 3);
-        assert_eq!(state.selected_index, 0);
+        assert_eq!(state.navigation.visible_items().len(), 3);
+        assert_eq!(state.navigation.cursor(), 0);
     }
 
     #[test]
     fn test_move_selection_wraps_forward() {
         let (mut state, _dir) = make_state_with_subdirs();
-        state.selected_index = 2; // last item
+        state.navigation.set_cursor(2); // last item
         state.move_selection(1);
-        assert_eq!(state.selected_index, 0); // must wrap to first
+        assert_eq!(state.navigation.cursor(), 0); // must wrap to first
     }
 
     #[test]
     fn test_move_selection_wraps_backward() {
         let (mut state, _dir) = make_state_with_subdirs();
-        state.selected_index = 0;
+        state.navigation.set_cursor(0);
         state.move_selection(-1);
-        assert_eq!(state.selected_index, 2); // must wrap to last
+        assert_eq!(state.navigation.cursor(), 2); // must wrap to last
     }
 
     #[test]
     fn test_move_selection_arbitrary_delta() {
         let (mut state, _dir) = make_state_with_subdirs(); // Has 3 items (indices 0, 1, 2)
-        state.selected_index = 1;
+        state.navigation.set_cursor(1);
         state.move_selection(5); // 1 + 5 = 6 -> 6 % 3 = 0
-        assert_eq!(state.selected_index, 0);
+        assert_eq!(state.navigation.cursor(), 0);
 
-        state.selected_index = 1;
+        state.navigation.set_cursor(1);
         state.move_selection(-5); // 1 - 5 = -4 -> -4 % 3 = -1 -> -1 + 3 = 2
-        assert_eq!(state.selected_index, 2);
+        assert_eq!(state.navigation.cursor(), 2);
     }
 
     #[test]
@@ -1272,7 +1124,10 @@ mod tests {
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
 
-        let filtered = state.filter_query("main");
+        state
+            .navigation
+            .set_filter(Some(String::from("main")), &state.all_entries);
+        let filtered = state.visible_items();
         assert_eq!(filtered.len(), 1);
         assert!(filtered[0].0.path.ends_with(PathBuf::from("src/main.rs")));
     }
@@ -1293,7 +1148,9 @@ mod tests {
 
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
-        state.search_query = String::from("app");
+        state
+            .navigation
+            .set_filter(Some(String::from("app")), &state.all_entries);
 
         let visible = state.visible_items();
         assert_eq!(visible.len(), 1);
@@ -1305,19 +1162,19 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
-        state.items = vec![
+        state.navigation.update_items(vec![
             mock_dir_entry(PathBuf::from("alpha"), 1, true),
             mock_dir_entry(PathBuf::from("beta"), 1, true),
-        ];
-        state.selected_index = 1;
+        ]);
+        state.navigation.set_cursor(1);
 
         state.push_search_char('a');
-        assert_eq!(state.selected_index, 0);
-        assert_eq!(state.search_query, "a");
+        assert_eq!(state.navigation.cursor(), 0);
+        assert_eq!(state.navigation.filter_query().unwrap_or(""), "a");
 
         state.pop_search_char();
-        assert_eq!(state.selected_index, 0);
-        assert!(state.search_query.is_empty());
+        assert_eq!(state.navigation.cursor(), 0);
+        assert!(state.navigation.filter_query().unwrap_or("").is_empty());
     }
 
     #[test]
@@ -1331,7 +1188,10 @@ mod tests {
 
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
-        let filtered = state.filter_query("main.rs");
+        state
+            .navigation
+            .set_filter(Some(String::from("main.rs")), &state.all_entries);
+        let filtered = state.visible_items();
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].0.path, file_path);
@@ -1368,7 +1228,7 @@ mod tests {
         wait_for_scan(&mut state);
 
         assert!(!state.is_scanning());
-        assert_eq!(state.items.len(), 1);
+        assert_eq!(state.navigation.visible_items().len(), 1);
         assert!(state.scan_applied);
 
         state.poll_scan();
@@ -1384,8 +1244,10 @@ mod tests {
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
 
-        state.items = vec![mock_dir_entry(file_path.clone(), 12, false)];
-        state.selected_index = 0;
+        state
+            .navigation
+            .update_items(vec![mock_dir_entry(file_path.clone(), 12, false)]);
+        state.navigation.set_cursor(0);
 
         assert!(state.preview_lines().is_empty());
 
@@ -1395,7 +1257,7 @@ mod tests {
         assert!(!lines.is_empty());
         assert!(lines[0].to_string().contains("fn test()"));
 
-        state.items.clear();
+        state.navigation.update_items(vec![]);
         state.update_preview_cache();
         assert!(state.preview_lines().is_empty());
     }
@@ -1411,11 +1273,17 @@ mod tests {
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
 
-        let matches_mrs = state.filter_query("mrs");
+        state
+            .navigation
+            .set_filter(Some(String::from("mrs")), &state.all_entries);
+        let matches_mrs = state.visible_items();
         assert_eq!(matches_mrs.len(), 1);
         assert_eq!(matches_mrs[0].0.path, main_path);
 
-        let matches_crgo = state.filter_query("crgo");
+        state
+            .navigation
+            .set_filter(Some(String::from("crgo")), &state.all_entries);
+        let matches_crgo = state.visible_items();
         assert_eq!(matches_crgo.len(), 1);
         assert_eq!(matches_crgo[0].0.path, cargo_path);
     }
@@ -1431,7 +1299,8 @@ mod tests {
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
 
-        let filtered = state.filter_query("");
+        state.navigation.set_filter(None, &state.all_entries);
+        let filtered = state.visible_items();
         assert_eq!(filtered.len(), 2);
     }
 
@@ -1444,7 +1313,10 @@ mod tests {
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
 
-        let filtered = state.filter_query("nonexistent");
+        state
+            .navigation
+            .set_filter(Some(String::from("nonexistent")), &state.all_entries);
+        let filtered = state.visible_items();
         assert!(filtered.is_empty());
     }
 
@@ -1461,7 +1333,7 @@ mod tests {
             size: 50,
             entry_type: EntryType::Directory,
             mtime: t1,
-            display_path: String::new(),
+            display_path: "z_file".to_string(),
             symlink_target: None,
         };
         let e2 = DirEntry {
@@ -1469,26 +1341,32 @@ mod tests {
             size: 100,
             entry_type: EntryType::Directory,
             mtime: t2,
-            display_path: String::new(),
+            display_path: "a_file".to_string(),
             symlink_target: None,
         };
 
-        state.items = vec![e1.clone(), e2.clone()];
+        state.navigation.update_items(vec![e1.clone(), e2.clone()]);
 
-        state.sort_items();
-        assert_eq!(state.items[0].path, PathBuf::from("a_file"));
+        assert_eq!(
+            state.navigation.visible_items()[0].path,
+            PathBuf::from("a_file")
+        );
 
-        state.sort_mode = SortMode::NameAsc;
-        state.sort_items();
-        assert_eq!(state.items[0].path, PathBuf::from("a_file"));
+        state.navigation.set_sort_mode(SortMode::NameAsc);
+        assert_eq!(
+            state.navigation.visible_items()[0].path,
+            PathBuf::from("a_file")
+        );
 
-        state.sort_mode = SortMode::MtimeDesc;
-        state.sort_items();
-        assert_eq!(state.items[0].path, PathBuf::from("a_file"));
+        state.navigation.set_sort_mode(SortMode::MtimeDesc);
+        assert_eq!(
+            state.navigation.visible_items()[0].path,
+            PathBuf::from("a_file")
+        );
 
-        state.sort_mode = SortMode::SizeDesc;
+        state.navigation.set_sort_mode(SortMode::SizeDesc);
         state.cycle_sort_mode();
-        assert_eq!(state.sort_mode, SortMode::NameAsc);
+        assert_eq!(state.navigation.sort_mode(), SortMode::NameAsc);
     }
 
     #[test]
@@ -1511,7 +1389,7 @@ mod tests {
         assert_eq!(visible_before[0].0.path, sub);
 
         // Select the directory and toggle expand
-        state.selected_index = 0;
+        state.navigation.set_cursor(0);
         state.toggle_expand();
 
         // After expansion: both directory and child_file should be visible
@@ -1669,8 +1547,10 @@ mod tests {
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
 
-        state.items = vec![mock_dir_entry(f1.clone(), 0, false)];
-        state.selected_index = 0;
+        state
+            .navigation
+            .update_items(vec![mock_dir_entry(f1.clone(), 0, false)]);
+        state.navigation.set_cursor(0);
 
         assert!(state.selected_paths.is_empty());
         state.toggle_select();
@@ -1699,8 +1579,10 @@ mod tests {
         wait_for_scan(&mut state);
 
         // Mock current item
-        state.items = vec![mock_dir_entry(file_path.clone(), 12, false)];
-        state.selected_index = 0;
+        state
+            .navigation
+            .update_items(vec![mock_dir_entry(file_path.clone(), 12, false)]);
+        state.navigation.set_cursor(0);
 
         state.yank_full_path();
         assert_eq!(state.yanked_files.len(), 1);
@@ -1734,8 +1616,10 @@ mod tests {
         let mut state = AppState::new(dst_dir.clone());
         wait_for_scan(&mut state);
 
-        state.items = vec![mock_dir_entry(file_path.clone(), 11, false)];
-        state.selected_index = 0;
+        state
+            .navigation
+            .update_items(vec![mock_dir_entry(file_path.clone(), 11, false)]);
+        state.navigation.set_cursor(0);
 
         state.cut_file();
         assert_eq!(state.cut_files.len(), 1);
@@ -1761,8 +1645,10 @@ mod tests {
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
 
-        state.items = vec![mock_dir_entry(file_path.clone(), 14, false)];
-        state.selected_index = 0;
+        state
+            .navigation
+            .update_items(vec![mock_dir_entry(file_path.clone(), 14, false)]);
+        state.navigation.set_cursor(0);
 
         state.request_rename();
         assert!(state.rename_mode);
@@ -1789,8 +1675,10 @@ mod tests {
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
 
-        state.items = vec![mock_dir_entry(file_path.clone(), 0, false)];
-        state.selected_index = 0;
+        state
+            .navigation
+            .update_items(vec![mock_dir_entry(file_path.clone(), 0, false)]);
+        state.navigation.set_cursor(0);
 
         state.request_delete();
         assert_eq!(state.modal_mode, ModalMode::DeleteConfirmation);

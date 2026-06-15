@@ -9,12 +9,7 @@
 // Created : 2026-06-13
 // ==========================================================================
 
-mod app;
-mod config;
-mod fs;
-mod git;
-mod shell;
-mod ui;
+use ascope::{app, fs, shell, ui};
 
 use std::{io, path::PathBuf, time::Duration};
 
@@ -147,11 +142,11 @@ fn event_loop(
                         }
                         _ => {}
                     }
-                } else if state.modal_mode != crate::app::ModalMode::None {
-                    if state.modal_mode == crate::app::ModalMode::DeleteConfirmation {
+                } else if state.modal_mode != ascope::app::ModalMode::None {
+                    if state.modal_mode == ascope::app::ModalMode::DeleteConfirmation {
                         match key.code {
                             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                                state.modal_mode = crate::app::ModalMode::None;
+                                state.modal_mode = ascope::app::ModalMode::None;
                                 state.delete_targets.clear();
                             }
                             KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -159,7 +154,7 @@ fn event_loop(
                             }
                             _ => {}
                         }
-                    } else if state.modal_mode == crate::app::ModalMode::OpenConfirmation {
+                    } else if state.modal_mode == ascope::app::ModalMode::OpenConfirmation {
                         match key.code {
                             KeyCode::Esc => {
                                 state.modal_mode = state.modal_confirm_prev;
@@ -176,14 +171,14 @@ fn event_loop(
                                 if let Some(path) = state.modal_target_path.take() {
                                     state.jump_to_path(path);
                                 }
-                                state.modal_mode = crate::app::ModalMode::None;
+                                state.modal_mode = ascope::app::ModalMode::None;
                                 state.modal_input.clear();
                             }
                             KeyCode::Char('n') => {
                                 if let Some(path) = state.modal_target_path.take() {
                                     state.open_tab(path);
                                 }
-                                state.modal_mode = crate::app::ModalMode::None;
+                                state.modal_mode = ascope::app::ModalMode::None;
                                 state.modal_input.clear();
                             }
                             KeyCode::Enter => {
@@ -194,7 +189,7 @@ fn event_loop(
                                         state.jump_to_path(path);
                                     }
                                 }
-                                state.modal_mode = crate::app::ModalMode::None;
+                                state.modal_mode = ascope::app::ModalMode::None;
                                 state.modal_input.clear();
                             }
                             _ => {}
@@ -202,15 +197,15 @@ fn event_loop(
                     } else {
                         match key.code {
                             KeyCode::Esc => {
-                                state.modal_mode = crate::app::ModalMode::None;
+                                state.modal_mode = ascope::app::ModalMode::None;
                                 state.modal_input.clear();
                             }
                             KeyCode::Up | KeyCode::Char('k') => {
                                 let len = match state.modal_mode {
-                                    crate::app::ModalMode::Bookmarks => {
+                                    ascope::app::ModalMode::Bookmarks => {
                                         state.config.bookmarks.len()
                                     }
-                                    crate::app::ModalMode::Recent => state.config.recent.len(),
+                                    ascope::app::ModalMode::Recent => state.config.recent.len(),
                                     _ => 0,
                                 };
                                 if len > 0 {
@@ -220,10 +215,10 @@ fn event_loop(
                             }
                             KeyCode::Down | KeyCode::Char('j') => {
                                 let len = match state.modal_mode {
-                                    crate::app::ModalMode::Bookmarks => {
+                                    ascope::app::ModalMode::Bookmarks => {
                                         state.config.bookmarks.len()
                                     }
-                                    crate::app::ModalMode::Recent => state.config.recent.len(),
+                                    ascope::app::ModalMode::Recent => state.config.recent.len(),
                                     _ => 0,
                                 };
                                 if len > 0 {
@@ -236,10 +231,10 @@ fn event_loop(
                                     if let Ok(idx) = state.modal_input.parse::<usize>() {
                                         let idx = idx.saturating_sub(1);
                                         match state.modal_mode {
-                                            crate::app::ModalMode::Bookmarks => {
+                                            ascope::app::ModalMode::Bookmarks => {
                                                 state.config.bookmarks.get(idx).cloned()
                                             }
-                                            crate::app::ModalMode::Recent => {
+                                            ascope::app::ModalMode::Recent => {
                                                 state.config.recent.get(idx).cloned()
                                             }
                                             _ => None,
@@ -249,12 +244,12 @@ fn event_loop(
                                     }
                                 } else {
                                     match state.modal_mode {
-                                        crate::app::ModalMode::Bookmarks => state
+                                        ascope::app::ModalMode::Bookmarks => state
                                             .config
                                             .bookmarks
                                             .get(state.modal_selected_index)
                                             .cloned(),
-                                        crate::app::ModalMode::Recent => state
+                                        ascope::app::ModalMode::Recent => state
                                             .config
                                             .recent
                                             .get(state.modal_selected_index)
@@ -266,17 +261,17 @@ fn event_loop(
                                 if let Some(path) = target_path {
                                     state.modal_target_path = Some(path);
                                     state.modal_confirm_prev = state.modal_mode;
-                                    state.modal_mode = crate::app::ModalMode::OpenConfirmation;
+                                    state.modal_mode = ascope::app::ModalMode::OpenConfirmation;
                                     state.modal_confirm_new_tab = false;
                                 } else {
-                                    state.modal_mode = crate::app::ModalMode::None;
+                                    state.modal_mode = ascope::app::ModalMode::None;
                                     state.modal_input.clear();
                                 }
                             }
                             KeyCode::Char('D') => {
-                                if state.modal_mode == crate::app::ModalMode::Bookmarks {
+                                if state.modal_mode == ascope::app::ModalMode::Bookmarks {
                                     state.remove_bookmark(state.modal_selected_index);
-                                } else if state.modal_mode == crate::app::ModalMode::Recent {
+                                } else if state.modal_mode == ascope::app::ModalMode::Recent {
                                     state.remove_recent(state.modal_selected_index);
                                 }
                             }
@@ -285,10 +280,10 @@ fn event_loop(
                                 if let Ok(idx) = state.modal_input.parse::<usize>() {
                                     let idx = idx.saturating_sub(1);
                                     let len = match state.modal_mode {
-                                        crate::app::ModalMode::Bookmarks => {
+                                        ascope::app::ModalMode::Bookmarks => {
                                             state.config.bookmarks.len()
                                         }
-                                        crate::app::ModalMode::Recent => state.config.recent.len(),
+                                        ascope::app::ModalMode::Recent => state.config.recent.len(),
                                         _ => 0,
                                     };
                                     if idx < len {
@@ -302,10 +297,10 @@ fn event_loop(
                                     if let Ok(idx) = state.modal_input.parse::<usize>() {
                                         let idx = idx.saturating_sub(1);
                                         let len = match state.modal_mode {
-                                            crate::app::ModalMode::Bookmarks => {
+                                            ascope::app::ModalMode::Bookmarks => {
                                                 state.config.bookmarks.len()
                                             }
-                                            crate::app::ModalMode::Recent => {
+                                            ascope::app::ModalMode::Recent => {
                                                 state.config.recent.len()
                                             }
                                             _ => 0,
@@ -324,7 +319,9 @@ fn event_loop(
                         KeyCode::Esc => state.toggle_search_mode(),
                         KeyCode::Enter => state.toggle_search_mode(),
                         KeyCode::Backspace => state.pop_search_char(),
-                        KeyCode::Char('/') if state.search_query.is_empty() => {
+                        KeyCode::Char('/')
+                            if state.navigation.filter_query().unwrap_or("").is_empty() =>
+                        {
                             state.toggle_search_mode();
                         }
                         KeyCode::Char(c) => state.push_search_char(c),
@@ -338,9 +335,9 @@ fn event_loop(
                         KeyCode::Up | KeyCode::Char('k') => state.move_selection(-1),
                         KeyCode::Enter => {
                             if let Some(target) = state.selected_item() {
-                                if target.entry_type == crate::fs::walker::EntryType::Directory {
+                                if target.entry_type == ascope::fs::walker::EntryType::Directory {
                                     state.navigate_in();
-                                } else if target.entry_type == crate::fs::walker::EntryType::File {
+                                } else if target.entry_type == ascope::fs::walker::EntryType::File {
                                     disable_raw_mode()?;
                                     execute!(
                                         terminal.backend_mut(),
@@ -352,10 +349,11 @@ fn event_loop(
                                     let editor = std::env::var("EDITOR")
                                         .unwrap_or_else(|_| "nvim".to_string());
                                     let mut cmd = std::process::Command::new(&editor);
+                                    let query = state.navigation.filter_query().unwrap_or("");
                                     if (editor.contains("nvim") || editor.contains("vim"))
-                                        && !state.search_query.is_empty()
+                                        && !query.is_empty()
                                     {
-                                        cmd.arg(format!("+/{}", state.search_query));
+                                        cmd.arg(format!("+/{}", query));
                                     }
                                     cmd.arg(&target.path);
 
@@ -374,7 +372,7 @@ fn event_loop(
                             }
                         }
                         KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
-                            if state.search_query.is_empty() {
+                            if state.navigation.filter_query().unwrap_or("").is_empty() {
                                 state.navigate_out();
                             } else {
                                 state.clear_search();
@@ -389,12 +387,12 @@ fn event_loop(
                         KeyCode::Char('x') => state.close_tab(),
                         KeyCode::Char('m') => state.add_bookmark(),
                         KeyCode::Char('b') => {
-                            state.modal_mode = crate::app::ModalMode::Bookmarks;
+                            state.modal_mode = ascope::app::ModalMode::Bookmarks;
                             state.modal_selected_index = 0;
                             state.modal_input.clear();
                         }
                         KeyCode::Char('R') => {
-                            state.modal_mode = crate::app::ModalMode::Recent;
+                            state.modal_mode = ascope::app::ModalMode::Recent;
                             state.modal_selected_index = 0;
                             state.modal_input.clear();
                         }
