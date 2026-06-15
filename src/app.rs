@@ -9,7 +9,6 @@
 // Created : 2026-06-13
 // ==========================================================================
 
-use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -246,17 +245,18 @@ impl AppState {
     /// preview cache if the selected file or search query has changed.
     pub fn update_preview_cache(&mut self) {
         let selected = self.selected_item().map(|x| x.path);
+        let query = self.navigation.filter_query().unwrap_or("").to_string();
 
         if let Some((cached_path, cached_query, _)) = &self.preview_cache {
-            if Some(cached_path) == selected.as_ref() && cached_query == &self.search_query {
+            if Some(cached_path) == selected.as_ref() && cached_query == &query {
                 return;
             }
         }
 
         if let Some(path) = selected {
             if path.is_file() {
-                let lines = crate::ui::widgets::build_preview_lines(&path, &self.search_query);
-                self.preview_cache = Some((path, self.search_query.clone(), lines));
+                let lines = crate::ui::widgets::build_preview_lines(&path, &query);
+                self.preview_cache = Some((path, query, lines));
                 return;
             }
         }
@@ -279,53 +279,25 @@ impl AppState {
 
     /// Return the currently visible items, filtered when search is active.
     pub fn visible_items(&self) -> Vec<(DirEntry, u32)> {
-        if self.search_query.is_empty() {
+        if self.navigation.filter_query().is_none() {
             return self.build_expanded_tree();
         }
 
-        // Check if cached query matches current query
-        let mut cache = self.search_cache.borrow_mut();
-        if let Some(cached) = cache.as_ref() {
-            if cached.query == self.search_query {
-                return cached.results.clone();
-            }
-        }
-
-        // Cache miss: calculate matching items
-        let results = self.filter_query(&self.search_query);
-        *cache = Some(SearchCache {
-            query: self.search_query.clone(),
-            results: results.clone(),
-        });
-        results
+        self.navigation
+            .visible_items_with_scores()
+            .into_iter()
+            .map(|(entry, score)| (entry.clone(), score))
+            .collect()
     }
 
     /// Return the currently selected visible entry, if any.
     pub fn selected_item(&self) -> Option<DirEntry> {
-        let visible = self.visible_items();
-        if visible.is_empty() {
-            return None;
-        }
-        let index = self.selected_index.min(visible.len() - 1);
-        visible.get(index).map(|(e, _)| e.clone())
+        self.navigation.current_selection().cloned()
     }
 
     /// Toggle the expansion state of the currently selected directory.
     pub fn toggle_expand(&mut self) {
-        if let Some(entry) = self.selected_item() {
-            if entry.entry_type == EntryType::Directory {
-                if self.expanded_paths.contains(&entry.path) {
-                    self.expanded_paths.remove(&entry.path);
-                } else {
-                    self.expanded_paths.insert(entry.path.clone());
-                }
-                // Clamp selected_index to the new visible bounds
-                let len = self.visible_items().len();
-                if len > 0 && self.selected_index >= len {
-                    self.selected_index = len - 1;
-                }
-            }
-        }
+        self.navigation.toggle_expand_selected();
     }
 
     fn get_children(&self, parent_path: &std::path::Path) -> Vec<DirEntry> {
@@ -337,7 +309,7 @@ impl AppState {
             .collect();
 
         // Sort children using the active sorting mode
-        match self.sort_mode {
+        match self.navigation.sort_mode() {
             SortMode::SizeDesc => {
                 children.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
             }
@@ -357,13 +329,13 @@ impl AppState {
 
     fn build_expanded_tree(&self) -> Vec<(DirEntry, u32)> {
         let mut result = Vec::new();
-        // Start with top-level items (which are already sorted in self.items)
+        // Start with top-level items from Navigation (which are already sorted)
         let mut stack: Vec<(DirEntry, usize)> =
-            self.items.iter().rev().map(|e| (e.clone(), 0)).collect();
+            self.navigation.visible_items().iter().rev().map(|&e| (e.clone(), 0)).collect();
 
         while let Some((entry, depth)) = stack.pop() {
             result.push((entry.clone(), 0));
-            if entry.entry_type == EntryType::Directory && self.expanded_paths.contains(&entry.path)
+            if entry.entry_type == EntryType::Directory && self.navigation.is_expanded(&entry.path)
             {
                 // Get children of this directory, sorted in reverse order so that when popped from stack they come out in correct order
                 let mut children = self.get_children(&entry.path);
@@ -395,16 +367,14 @@ impl AppState {
                 self.current_path = path.clone();
                 self.active_stats = active_stats;
                 self.scan_progress = scan_progress;
-                self.items = Vec::new();
+                self.navigation.update_items(Vec::new());
+                self.navigation.set_cursor(0);
+                self.navigation.clear_expanded();
+                self.navigation.set_filter(None);
                 self.all_entries = Vec::new();
-                self.selected_index = 0;
-                self.search_mode = false;
-                self.search_query = String::new();
                 self.scan_applied = false;
                 self.preview_cache = None;
                 self.git_ctx = git_ctx;
-                *self.search_cache.borrow_mut() = None;
-                self.expanded_paths = std::collections::HashSet::new();
 
                 self.record_navigation(path);
                 self.save_active_tab();
@@ -430,16 +400,14 @@ impl AppState {
             self.current_path = path.clone();
             self.active_stats = active_stats;
             self.scan_progress = scan_progress;
-            self.items = Vec::new();
+            self.navigation.update_items(Vec::new());
+            self.navigation.set_cursor(0);
+            self.navigation.clear_expanded();
+            self.navigation.set_filter(None);
             self.all_entries = Vec::new();
-            self.selected_index = 0;
-            self.search_mode = false;
-            self.search_query = String::new();
             self.scan_applied = false;
             self.preview_cache = None;
             self.git_ctx = git_ctx;
-            *self.search_cache.borrow_mut() = None;
-            self.expanded_paths = std::collections::HashSet::new();
 
             self.record_navigation(path);
             self.save_active_tab();
@@ -453,17 +421,11 @@ impl AppState {
                 current_path: self.current_path.clone(),
                 active_stats: Arc::clone(&self.active_stats),
                 scan_progress: Arc::clone(&self.scan_progress),
-                items: self.items.clone(),
+                navigation: self.navigation.clone(),
                 all_entries: self.all_entries.clone(),
-                selected_index: self.selected_index,
-                search_mode: self.search_mode,
-                search_query: self.search_query.clone(),
                 scan_applied: self.scan_applied,
                 preview_cache: self.preview_cache.clone(),
                 git_ctx: self.git_ctx.clone(),
-                search_cache: RefCell::new(self.search_cache.borrow().clone()),
-                sort_mode: self.sort_mode,
-                expanded_paths: self.expanded_paths.clone(),
             };
         }
     }
@@ -475,17 +437,11 @@ impl AppState {
             self.current_path = tab.current_path.clone();
             self.active_stats = Arc::clone(&tab.active_stats);
             self.scan_progress = Arc::clone(&tab.scan_progress);
-            self.items = tab.items.clone();
+            self.navigation = tab.navigation.clone();
             self.all_entries = tab.all_entries.clone();
-            self.selected_index = tab.selected_index;
-            self.search_mode = tab.search_mode;
-            self.search_query = tab.search_query.clone();
             self.scan_applied = tab.scan_applied;
             self.preview_cache = tab.preview_cache.clone();
             self.git_ctx = tab.git_ctx.clone();
-            self.search_cache = tab.search_cache.clone();
-            self.sort_mode = tab.sort_mode;
-            self.expanded_paths = tab.expanded_paths.clone();
             self.active_tab = index;
         }
     }
@@ -509,17 +465,11 @@ impl AppState {
             current_path: path,
             active_stats,
             scan_progress,
-            items: Vec::new(),
+            navigation: crate::navigation::Navigation::new(Vec::new(), SortMode::SizeDesc),
             all_entries: Vec::new(),
-            selected_index: 0,
-            search_mode: false,
-            search_query: String::new(),
             scan_applied: false,
             preview_cache: None,
             git_ctx,
-            search_cache: RefCell::new(None),
-            sort_mode: self.sort_mode,
-            expanded_paths: std::collections::HashSet::new(),
         };
 
         self.tabs.push(new_tab);
@@ -643,16 +593,14 @@ impl AppState {
         self.current_path = path.clone();
         self.active_stats = active_stats;
         self.scan_progress = scan_progress;
-        self.items = Vec::new();
+        self.navigation.update_items(Vec::new());
+        self.navigation.set_cursor(0);
+        self.navigation.clear_expanded();
+        self.navigation.set_filter(None);
         self.all_entries = Vec::new();
-        self.selected_index = 0;
-        self.search_mode = false;
-        self.search_query = String::new();
         self.scan_applied = false;
         self.preview_cache = None;
         self.git_ctx = git_ctx;
-        *self.search_cache.borrow_mut() = None;
-        self.expanded_paths = std::collections::HashSet::new();
 
         self.record_navigation(path);
         self.save_active_tab();
@@ -1007,12 +955,14 @@ impl AppState {
         if len == 0 {
             return;
         }
-        let idx = (self.selected_index as isize + delta) % len as isize;
-        self.selected_index = if idx < 0 {
+        let current = self.navigation.cursor();
+        let idx = (current as isize + delta) % len as isize;
+        let new_idx = if idx < 0 {
             (idx + len as isize) as usize
         } else {
             idx as usize
         };
+        self.navigation.set_cursor(new_idx);
     }
 
     /// Toggle search-mode focus. Leaving search mode preserves the query so the
@@ -1023,20 +973,25 @@ impl AppState {
 
     /// Clear the active query and reset the cursor to the first visible row.
     pub fn clear_search(&mut self) {
-        self.search_query.clear();
-        self.selected_index = 0;
+        self.navigation.set_filter(None);
     }
 
     /// Append one typed character to the live query.
     pub fn push_search_char(&mut self, ch: char) {
-        self.search_query.push(ch);
-        self.selected_index = 0;
+        let mut query = self.navigation.filter_query().unwrap_or("").to_string();
+        query.push(ch);
+        self.navigation.set_filter(Some(query));
     }
 
     /// Delete the most recent search character.
     pub fn pop_search_char(&mut self) {
-        self.search_query.pop();
-        self.selected_index = 0;
+        let mut query = self.navigation.filter_query().unwrap_or("").to_string();
+        query.pop();
+        if query.is_empty() {
+            self.navigation.set_filter(None);
+        } else {
+            self.navigation.set_filter(Some(query));
+        }
     }
 
     /// Fuzzy match query over files and directories using the Nucleo matcher engine.
