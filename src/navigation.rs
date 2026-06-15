@@ -1,7 +1,7 @@
-use crate::fs::walker::{DirEntry, EntryType};
+use crate::fs::walker::DirEntry;
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -19,19 +19,10 @@ pub enum NavigationAction {
     None,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct FilterCache {
     query: String,
     results: Vec<(usize, u32)>,
-}
-
-impl Default for FilterCache {
-    fn default() -> Self {
-        Self {
-            query: String::new(),
-            results: Vec::new(),
-        }
-    }
 }
 
 pub struct Navigation {
@@ -60,7 +51,8 @@ impl Navigation {
     fn apply_sort(&mut self) {
         match self.sort_mode {
             crate::app::SortMode::SizeDesc => {
-                self.items.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
+                self.items
+                    .sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
             }
             crate::app::SortMode::NameAsc => {
                 self.items.sort_by(|a, b| {
@@ -70,8 +62,54 @@ impl Navigation {
                 });
             }
             crate::app::SortMode::MtimeDesc => {
-                self.items.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.path.cmp(&b.path)));
+                self.items
+                    .sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.path.cmp(&b.path)));
             }
         }
+    }
+
+    pub fn move_cursor(&mut self, direction: Direction) -> NavigationAction {
+        let visible = self.visible_items();
+        if visible.is_empty() {
+            return NavigationAction::None;
+        }
+
+        match direction {
+            Direction::Up => {
+                if self.cursor > 0 {
+                    self.cursor -= 1;
+                }
+            }
+            Direction::Down => {
+                if self.cursor < visible.len().saturating_sub(1) {
+                    self.cursor += 1;
+                }
+            }
+            Direction::First => {
+                self.cursor = 0;
+            }
+            Direction::Last => {
+                self.cursor = visible.len().saturating_sub(1);
+            }
+        }
+        NavigationAction::None
+    }
+
+    pub fn visible_items(&self) -> Vec<&DirEntry> {
+        if self.filter_query.is_some() {
+            let cache = self.filter_cache.borrow();
+            cache
+                .results
+                .iter()
+                .filter_map(|(idx, _)| self.items.get(*idx))
+                .collect()
+        } else {
+            self.items.iter().collect()
+        }
+    }
+
+    pub fn current_selection(&self) -> Option<&DirEntry> {
+        let visible = self.visible_items();
+        visible.get(self.cursor).copied()
     }
 }
