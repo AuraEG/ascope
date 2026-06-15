@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use crate::fs::walker::{scan_path_async, PathStats, ScanProgress};
+use crate::fs::walker::{scan_immediate, scan_path_async, PathStats, ScanProgress};
 use crate::git::GitContext;
 use ratatui::text::Line;
 
@@ -105,24 +105,37 @@ pub struct AppState {
 // --------------------------------------------------------------------------
 
 impl AppState {
-    /// Start an async scan of `root` and return immediately with empty stats.
-    /// The TUI renders right away; `poll_scan()` will populate `items` once
-    /// the background thread finishes.
-    pub fn new(root: PathBuf) -> Self {
+    #[allow(clippy::type_complexity)]
+    fn prepare_directory_load(
+        path: &std::path::Path,
+    ) -> (
+        Arc<Mutex<PathStats>>,
+        Arc<Mutex<ScanProgress>>,
+        Option<GitContext>,
+        Vec<DirEntry>,
+    ) {
         let active_stats = Arc::new(Mutex::new(PathStats::default()));
         let scan_progress = Arc::new(Mutex::new(ScanProgress::default()));
 
         scan_path_async(
-            root.clone(),
+            path.to_path_buf(),
             Arc::clone(&active_stats),
             Arc::clone(&scan_progress),
         );
 
-        let git_ctx = GitContext::read(&root);
+        let git_ctx = GitContext::read(path);
+        let immediate_entries = scan_immediate(path).unwrap_or_default();
+        (active_stats, scan_progress, git_ctx, immediate_entries)
+    }
+
+    /// Create a new AppState pointing to `root` and start scanning. The TUI will
+    /// render immediately with a progress spinner while the scan proceeds until
+    /// the background thread finishes.
+    pub fn new(root: PathBuf) -> Self {
+        let (active_stats, scan_progress, git_ctx, immediate_entries) =
+            Self::prepare_directory_load(&root);
 
         let mut config = crate::config::Config::load();
-        // Skip adding "." or empty paths to recent if we want to resolve to absolute, but keeping it simple and direct is standard.
-        // Wait, to make it completely correct and consistent, let's normalize or use it directly. Using directly is perfect.
         if !config.recent.contains(&root) {
             config.recent.push_front(root.clone());
             if config.recent.len() > 50 {
@@ -135,8 +148,11 @@ impl AppState {
             current_path: root.clone(),
             active_stats: Arc::clone(&active_stats),
             scan_progress: Arc::clone(&scan_progress),
-            navigation: crate::navigation::Navigation::new(Vec::new(), SortMode::SizeDesc),
-            all_entries: Vec::new(),
+            navigation: crate::navigation::Navigation::new(
+                immediate_entries.clone(),
+                SortMode::SizeDesc,
+            ),
+            all_entries: immediate_entries.clone(),
             scan_applied: false,
             preview_cache: None,
             git_ctx: git_ctx.clone(),
@@ -146,8 +162,11 @@ impl AppState {
             current_path: root,
             active_stats,
             scan_progress,
-            navigation: crate::navigation::Navigation::new(Vec::new(), SortMode::SizeDesc),
-            all_entries: Vec::new(),
+            navigation: crate::navigation::Navigation::new(
+                immediate_entries.clone(),
+                SortMode::SizeDesc,
+            ),
+            all_entries: immediate_entries,
             scan_applied: false,
             preview_cache: None,
             git_ctx,
@@ -223,9 +242,17 @@ impl AppState {
             self.all_entries = stats.all_entries.clone();
             drop(stats);
 
+            // Save currently selected item's path
+            let selected_path = self.navigation.current_selection().map(|e| e.path.clone());
+
             // Use Navigation to update items (handles sorting automatically)
             self.navigation.update_items(new_items);
             self.scan_applied = true;
+
+            // Restore selection
+            if let Some(path) = selected_path {
+                self.navigation.select_path(&path);
+            }
 
             if let Some(query) = self.navigation.filter_query().map(String::from) {
                 self.navigation.set_filter(Some(query), &self.all_entries);
@@ -360,25 +387,17 @@ impl AppState {
         if let Some(target) = self.selected_item() {
             if target.entry_type == EntryType::Directory {
                 let path = target.path;
-                let active_stats = Arc::new(Mutex::new(PathStats::default()));
-                let scan_progress = Arc::new(Mutex::new(ScanProgress::default()));
-
-                scan_path_async(
-                    path.clone(),
-                    Arc::clone(&active_stats),
-                    Arc::clone(&scan_progress),
-                );
-
-                let git_ctx = GitContext::read(&path);
+                let (active_stats, scan_progress, git_ctx, immediate_entries) =
+                    Self::prepare_directory_load(&path);
 
                 self.current_path = path.clone();
                 self.active_stats = active_stats;
                 self.scan_progress = scan_progress;
-                self.navigation.update_items(Vec::new());
+                self.navigation.update_items(immediate_entries.clone());
                 self.navigation.set_cursor(0);
                 self.navigation.clear_expanded();
                 self.navigation.set_filter(None, &[]);
-                self.all_entries = Vec::new();
+                self.all_entries = immediate_entries;
                 self.scan_applied = false;
                 self.preview_cache = None;
                 self.git_ctx = git_ctx;
@@ -393,25 +412,17 @@ impl AppState {
     pub fn navigate_out(&mut self) {
         if let Some(parent) = self.current_path.parent() {
             let path = parent.to_path_buf();
-            let active_stats = Arc::new(Mutex::new(PathStats::default()));
-            let scan_progress = Arc::new(Mutex::new(ScanProgress::default()));
-
-            scan_path_async(
-                path.clone(),
-                Arc::clone(&active_stats),
-                Arc::clone(&scan_progress),
-            );
-
-            let git_ctx = GitContext::read(&path);
+            let (active_stats, scan_progress, git_ctx, immediate_entries) =
+                Self::prepare_directory_load(&path);
 
             self.current_path = path.clone();
             self.active_stats = active_stats;
             self.scan_progress = scan_progress;
-            self.navigation.update_items(Vec::new());
+            self.navigation.update_items(immediate_entries.clone());
             self.navigation.set_cursor(0);
             self.navigation.clear_expanded();
             self.navigation.set_filter(None, &[]);
-            self.all_entries = Vec::new();
+            self.all_entries = immediate_entries;
             self.scan_applied = false;
             self.preview_cache = None;
             self.git_ctx = git_ctx;
@@ -457,23 +468,18 @@ impl AppState {
     pub fn open_tab(&mut self, path: PathBuf) {
         self.save_active_tab();
 
-        let active_stats = Arc::new(Mutex::new(PathStats::default()));
-        let scan_progress = Arc::new(Mutex::new(ScanProgress::default()));
-
-        scan_path_async(
-            path.clone(),
-            Arc::clone(&active_stats),
-            Arc::clone(&scan_progress),
-        );
-
-        let git_ctx = GitContext::read(&path);
+        let (active_stats, scan_progress, git_ctx, immediate_entries) =
+            Self::prepare_directory_load(&path);
 
         let new_tab = Tab {
             current_path: path,
             active_stats,
             scan_progress,
-            navigation: crate::navigation::Navigation::new(Vec::new(), SortMode::SizeDesc),
-            all_entries: Vec::new(),
+            navigation: crate::navigation::Navigation::new(
+                immediate_entries.clone(),
+                SortMode::SizeDesc,
+            ),
+            all_entries: immediate_entries,
             scan_applied: false,
             preview_cache: None,
             git_ctx,
@@ -586,25 +592,17 @@ impl AppState {
 
     /// Jump to a specific directory path inside the active tab.
     pub fn jump_to_path(&mut self, path: PathBuf) {
-        let active_stats = Arc::new(Mutex::new(PathStats::default()));
-        let scan_progress = Arc::new(Mutex::new(ScanProgress::default()));
-
-        scan_path_async(
-            path.clone(),
-            Arc::clone(&active_stats),
-            Arc::clone(&scan_progress),
-        );
-
-        let git_ctx = GitContext::read(&path);
+        let (active_stats, scan_progress, git_ctx, immediate_entries) =
+            Self::prepare_directory_load(&path);
 
         self.current_path = path.clone();
         self.active_stats = active_stats;
         self.scan_progress = scan_progress;
-        self.navigation.update_items(Vec::new());
+        self.navigation.update_items(immediate_entries.clone());
         self.navigation.set_cursor(0);
         self.navigation.clear_expanded();
         self.navigation.set_filter(None, &[]);
-        self.all_entries = Vec::new();
+        self.all_entries = immediate_entries;
         self.scan_applied = false;
         self.preview_cache = None;
         self.git_ctx = git_ctx;
