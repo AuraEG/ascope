@@ -1,7 +1,7 @@
-use crate::fs::walker::DirEntry;
+use crate::fs::walker::{DirEntry, EntryType};
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -111,5 +111,46 @@ impl Navigation {
     pub fn current_selection(&self) -> Option<&DirEntry> {
         let visible = self.visible_items();
         visible.get(self.cursor).copied()
+    }
+
+    pub fn enter_selected(&mut self) -> NavigationAction {
+        if let Some(entry) = self.current_selection() {
+            match entry.entry_type {
+                EntryType::Directory => NavigationAction::EnterDirectory(entry.path.clone()),
+                EntryType::File => NavigationAction::OpenFile(entry.path.clone()),
+                EntryType::Symlink => {
+                    if let Some(target) = &entry.symlink_target {
+                        if target.is_dir() {
+                            NavigationAction::EnterDirectory(target.clone())
+                        } else {
+                            NavigationAction::OpenFile(entry.path.clone())
+                        }
+                    } else {
+                        NavigationAction::None
+                    }
+                }
+            }
+        } else {
+            NavigationAction::None
+        }
+    }
+
+    pub fn toggle_expand_selected(&mut self) -> NavigationAction {
+        if let Some(entry) = self.current_selection() {
+            if entry.entry_type == EntryType::Directory {
+                let path = entry.path.clone();
+                if self.expanded.contains(&path) {
+                    self.expanded.remove(&path);
+                } else {
+                    self.expanded.insert(path.clone());
+                }
+                return NavigationAction::ToggleExpansion(path);
+            }
+        }
+        NavigationAction::None
+    }
+
+    pub fn is_expanded(&self, path: &Path) -> bool {
+        self.expanded.contains(path)
     }
 }
