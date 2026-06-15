@@ -43,61 +43,29 @@ pub enum ModalMode {
 
 use crate::fs::walker::{DirEntry, EntryType};
 
-#[derive(Clone)]
-pub(crate) struct SearchCache {
-    query: String,
-    results: Vec<(DirEntry, u32)>,
-}
-
 /// Represents a single directory view tab with its own navigation history and search query.
 pub struct Tab {
     pub current_path: PathBuf,
     pub active_stats: Arc<Mutex<PathStats>>,
     pub scan_progress: Arc<Mutex<ScanProgress>>,
-    pub items: Vec<DirEntry>,
+    pub navigation: crate::navigation::Navigation,
     pub all_entries: Vec<DirEntry>,
-    pub selected_index: usize,
-    pub search_mode: bool,
-    pub search_query: String,
     pub scan_applied: bool,
     pub preview_cache: Option<(PathBuf, String, Vec<Line<'static>>)>,
     pub git_ctx: Option<GitContext>,
-    pub search_cache: RefCell<Option<SearchCache>>,
-    pub sort_mode: SortMode,
-    pub expanded_paths: std::collections::HashSet<PathBuf>,
 }
 
 /// Central state passed to every render call and mutated by keyboard events.
 pub struct AppState {
-    /// Directory currently displayed in the tree pane.
     pub current_path: PathBuf,
-    /// Aggregated scan results for `current_path` (shared with scanner thread).
     active_stats: Arc<Mutex<PathStats>>,
-    /// Lifecycle of the background scan for `current_path`.
     scan_progress: Arc<Mutex<ScanProgress>>,
-    /// Direct child directories sorted by size descending; drives the list.
-    pub items: Vec<DirEntry>,
-    /// All entries scanned recursively under the root path.
+    pub navigation: crate::navigation::Navigation,
     pub all_entries: Vec<DirEntry>,
-    /// Index of the highlighted row in the currently visible item set.
-    pub selected_index: usize,
-    /// Whether the bottom search overlay is currently focused.
-    pub search_mode: bool,
-    /// Current live substring query used to filter visible rows.
-    pub search_query: String,
-    /// Flag indicating if the background scan results have already been applied to `items`.
     scan_applied: bool,
-    /// Cache for the highlighted preview lines of the currently selected file.
     preview_cache: Option<(PathBuf, String, Vec<Line<'static>>)>,
-    /// Git context (branch, dirty count) if inside a git repository.
     pub git_ctx: Option<GitContext>,
-    /// Memoized cache of the last query match results
-    search_cache: RefCell<Option<SearchCache>>,
-    /// Active sorting mode
-    pub sort_mode: SortMode,
-    /// Paths that are currently expanded in the tree view
-    pub expanded_paths: std::collections::HashSet<PathBuf>,
-    /// All open tabs
+    pub search_mode: bool,
     pub tabs: Vec<Tab>,
     /// Index of the active tab
     pub active_tab: usize,
@@ -172,34 +140,23 @@ impl AppState {
             current_path: root.clone(),
             active_stats: Arc::clone(&active_stats),
             scan_progress: Arc::clone(&scan_progress),
-            items: Vec::new(),
+            navigation: crate::navigation::Navigation::new(Vec::new(), SortMode::SizeDesc),
             all_entries: Vec::new(),
-            selected_index: 0,
-            search_mode: false,
-            search_query: String::new(),
             scan_applied: false,
             preview_cache: None,
             git_ctx: git_ctx.clone(),
-            search_cache: RefCell::new(None),
-            sort_mode: SortMode::SizeDesc,
-            expanded_paths: std::collections::HashSet::new(),
         };
 
         Self {
             current_path: root,
             active_stats,
             scan_progress,
-            items: Vec::new(),
+            navigation: crate::navigation::Navigation::new(Vec::new(), SortMode::SizeDesc),
             all_entries: Vec::new(),
-            selected_index: 0,
-            search_mode: false,
-            search_query: String::new(),
             scan_applied: false,
             preview_cache: None,
             git_ctx,
-            search_cache: RefCell::new(None),
-            sort_mode: SortMode::SizeDesc,
-            expanded_paths: std::collections::HashSet::new(),
+            search_mode: false,
             tabs: vec![initial_tab],
             active_tab: 0,
             config,
@@ -269,44 +226,20 @@ impl AppState {
                 .cloned()
                 .collect();
             self.all_entries = stats.all_entries.clone();
-            *self.search_cache.borrow_mut() = None;
             drop(stats);
-            self.items = new_items;
-            self.sort_items();
+            self.navigation.update_items(new_items);
             self.scan_applied = true;
-        }
-    }
-
-    /// Sort items based on the active sort mode.
-    pub fn sort_items(&mut self) {
-        match self.sort_mode {
-            SortMode::SizeDesc => {
-                self.items
-                    .sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
-            }
-            SortMode::NameAsc => {
-                self.items.sort_by(|a, b| {
-                    let name_a = a.path.file_name().unwrap_or_default();
-                    let name_b = b.path.file_name().unwrap_or_default();
-                    name_a.cmp(name_b)
-                });
-            }
-            SortMode::MtimeDesc => {
-                self.items
-                    .sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.path.cmp(&b.path)));
-            }
         }
     }
 
     /// Cycle through size -> name -> modification time sorting modes.
     pub fn cycle_sort_mode(&mut self) {
-        self.sort_mode = match self.sort_mode {
+        let next_mode = match self.navigation.sort_mode() {
             SortMode::SizeDesc => SortMode::NameAsc,
             SortMode::NameAsc => SortMode::MtimeDesc,
             SortMode::MtimeDesc => SortMode::SizeDesc,
         };
-        self.sort_items();
-        self.selected_index = 0;
+        self.navigation.set_sort_mode(next_mode);
     }
 
     /// Check if the currently highlighted item is a file and update the
