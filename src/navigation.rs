@@ -189,4 +189,24 @@ impl Navigation {
     pub fn filter_query(&self) -> Option<&str> {
         self.filter_query.as_deref()
     }
+
+    pub fn set_sort_mode(&mut self, mode: crate::app::SortMode) {
+        self.sort_mode = mode;
+        self.apply_sort();
+        self.cursor = 0;
+    }
+
+    pub fn sort_mode(&self) -> crate::app::SortMode {
+        self.sort_mode
+    }
+
+    pub fn update_items(&mut self, items: Vec<DirEntry>) {
+        self.items = items;
+        self.apply_sort();
+        let visible_count = self.visible_items().len();
+        if self.cursor >= visible_count && visible_count > 0 {
+            self.cursor = visible_count - 1;
+        }
+        self.filter_cache.borrow_mut().results.clear();
+    }
 }
