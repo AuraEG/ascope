@@ -153,4 +153,39 @@ impl Navigation {
     pub fn is_expanded(&self, path: &Path) -> bool {
         self.expanded.contains(path)
     }
+
+    pub fn set_filter(&mut self, query: Option<String>) {
+        self.filter_query = query.clone();
+
+        if let Some(q) = query {
+            use nucleo::{
+                pattern::{CaseMatching, Normalization, Pattern},
+                Config, Matcher,
+            };
+
+            let mut matcher = Matcher::new(Config::DEFAULT);
+            let pattern = Pattern::parse(&q, CaseMatching::Smart, Normalization::Smart);
+
+            let mut results = Vec::new();
+            for (idx, item) in self.items.iter().enumerate() {
+                if let Some(score) = matcher.fuzzy_match(&item.display_path, &pattern) {
+                    results.push((idx, score));
+                }
+            }
+            results.sort_by(|a, b| b.1.cmp(&a.1));
+
+            let mut cache = self.filter_cache.borrow_mut();
+            cache.query = q;
+            cache.results = results;
+
+            self.cursor = 0;
+        } else {
+            self.filter_cache.borrow_mut().results.clear();
+            self.cursor = 0;
+        }
+    }
+
+    pub fn filter_query(&self) -> Option<&str> {
+        self.filter_query.as_deref()
+    }
 }
