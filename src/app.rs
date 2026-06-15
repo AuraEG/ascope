@@ -53,8 +53,8 @@ pub struct Tab {
 /// Central state passed to every render call and mutated by keyboard events.
 pub struct AppState {
     pub current_path: PathBuf,
-    active_stats: Arc<Mutex<PathStats>>,
-    scan_progress: Arc<Mutex<ScanProgress>>,
+    pub active_stats: Arc<Mutex<PathStats>>,
+    pub scan_progress: Arc<Mutex<ScanProgress>>,
     pub navigation: crate::navigation::Navigation,
     pub all_entries: Vec<DirEntry>,
     scan_applied: bool,

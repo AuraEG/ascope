@@ -2,6 +2,25 @@ use ascope::{app::AppState, navigation::Direction};
 use std::fs::File;
 use tempfile::tempdir;
 
+fn wait_for_scan(state: &mut AppState) {
+    let start = std::time::Instant::now();
+    loop {
+        state.poll_scan();
+        if matches!(
+            *state
+                .scan_progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+            ascope::fs::walker::ScanProgress::Complete
+        ) {
+            break;
+        }
+        assert!(start.elapsed().as_secs() < 5, "scan timed out");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    state.poll_scan();
+}
+
 #[test]
 fn test_navigation_in_real_appstate() {
     let temp_dir = tempdir().unwrap();
@@ -11,12 +30,7 @@ fn test_navigation_in_real_appstate() {
 
     let mut state = AppState::new(temp_dir.path().to_path_buf());
 
-    // Wait for scan to complete
-    while state.is_scanning() {
-        state.poll_scan();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    state.poll_scan();
+    wait_for_scan(&mut state);
 
     // Test cursor movement
     let visible_count = state.navigation.visible_items().len();
@@ -35,11 +49,7 @@ fn test_filtering_in_appstate() {
 
     let mut state = AppState::new(temp_dir.path().to_path_buf());
 
-    while state.is_scanning() {
-        state.poll_scan();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    state.poll_scan();
+    wait_for_scan(&mut state);
 
     // Apply filter
     state
