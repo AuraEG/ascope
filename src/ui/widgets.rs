@@ -403,12 +403,13 @@ fn render_tree(f: &mut Frame, state: &AppState, area: Rect) {
         0
     } else {
         let half = max_height / 2;
-        if state.selected_index < half {
+        let cursor = state.navigation.cursor();
+        if cursor < half {
             0
-        } else if state.selected_index >= total_items - half {
+        } else if cursor >= total_items - half {
             total_items - max_height
         } else {
-            state.selected_index - half
+            cursor - half
         }
     };
 
@@ -445,7 +446,7 @@ fn render_tree(f: &mut Frame, state: &AppState, area: Rect) {
             }
 
             // Render score badge if search is active
-            if !state.search_query.is_empty() && *score > 0 {
+            if state.navigation.filter_query().map_or(false, |q| !q.is_empty()) && *score > 0 {
                 spans.push(Span::styled(
                     format!(" [{score}]"),
                     Style::default().fg(Color::Yellow),
@@ -513,14 +514,14 @@ fn render_tree(f: &mut Frame, state: &AppState, area: Rect) {
             }
 
             let mtime_str = format_system_time(mtime);
-            let mtime_style = if actual_idx == state.selected_index {
+            let mtime_style = if actual_idx == state.navigation.cursor() {
                 Style::default().fg(Color::Cyan)
             } else {
                 Style::default().fg(Color::DarkGray)
             };
             spans.push(Span::styled(format!(" [{}]", mtime_str), mtime_style));
 
-            let item_style = if actual_idx == state.selected_index {
+            let item_style = if actual_idx == state.navigation.cursor() {
                 Style::default().fg(Color::Cyan).bg(Color::DarkGray)
             } else if is_yanked {
                 Style::default().fg(Color::Rgb(240, 200, 50)) // Gold/yellow
@@ -567,12 +568,13 @@ fn render_size_bars(f: &mut Frame, state: &AppState, area: Rect) {
         0
     } else {
         let half = max_height / 2;
-        if state.selected_index < half {
+        let cursor = state.navigation.cursor();
+        if cursor < half {
             0
-        } else if state.selected_index >= total_items - half {
+        } else if cursor >= total_items - half {
             total_items - max_height
         } else {
-            state.selected_index - half
+            cursor - half
         }
     };
 
@@ -927,7 +929,8 @@ fn render_search_overlay(f: &mut Frame, state: &AppState, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
 
-    let matches_count = if state.search_query.is_empty() {
+    let query = state.navigation.filter_query().unwrap_or("");
+    let matches_count = if query.is_empty() {
         0
     } else {
         state.visible_items().len()
@@ -935,7 +938,7 @@ fn render_search_overlay(f: &mut Frame, state: &AppState, area: Rect) {
 
     let prompt = Paragraph::new(format!(
         "Search: {} ({} matches)",
-        state.search_query, matches_count
+        query, matches_count
     ))
     .block(block);
     f.render_widget(Clear, area);
@@ -961,17 +964,18 @@ fn render_status_bar(f: &mut Frame, state: &AppState, area: Rect) {
     spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
 
     // 2. Entries Count / Scanning
+    let entry_count = state.navigation.visible_items().len();
     if state.is_scanning() {
         let label = state.scan_progress_label();
         spans.push(Span::styled(
-            format!(" {label} ({} entries) ", state.items.len()),
+            format!(" {label} ({entry_count} entries) "),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ));
     } else {
         spans.push(Span::styled(
-            format!(" {} entries ", state.items.len()),
+            format!(" {entry_count} entries "),
             Style::default().fg(Color::White),
         ));
     }
@@ -987,7 +991,7 @@ fn render_status_bar(f: &mut Frame, state: &AppState, area: Rect) {
     spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
 
     // 4. Sort Mode
-    let sort_label = match state.sort_mode {
+    let sort_label = match state.navigation.sort_mode() {
         crate::app::SortMode::SizeDesc => " sort: size↓ ",
         crate::app::SortMode::NameAsc => " sort: name↑ ",
         crate::app::SortMode::MtimeDesc => " sort: mtime↓ ",
