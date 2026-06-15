@@ -320,7 +320,7 @@ fn event_loop(
                             _ => {}
                         }
                     }
-                else if state.search_mode {
+                } else if state.search_mode {
                     match key.code {
                         KeyCode::Esc => state.toggle_search_mode(),
                         KeyCode::Enter => state.toggle_search_mode(),
