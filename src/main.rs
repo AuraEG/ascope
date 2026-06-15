@@ -13,6 +13,7 @@ mod app;
 mod config;
 mod fs;
 mod git;
+mod navigation;
 mod shell;
 mod ui;
 
