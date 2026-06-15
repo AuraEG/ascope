@@ -222,7 +222,7 @@ impl AppState {
                 .collect();
             self.all_entries = stats.all_entries.clone();
             drop(stats);
-            
+
             // Use Navigation to update items (handles sorting automatically)
             self.navigation.update_items(new_items);
             self.scan_applied = true;
@@ -332,8 +332,13 @@ impl AppState {
     fn build_expanded_tree(&self) -> Vec<(DirEntry, u32)> {
         let mut result = Vec::new();
         // Start with top-level items from Navigation (which are already sorted)
-        let mut stack: Vec<(DirEntry, usize)> =
-            self.navigation.visible_items().iter().rev().map(|&e| (e.clone(), 0)).collect();
+        let mut stack: Vec<(DirEntry, usize)> = self
+            .navigation
+            .visible_items()
+            .iter()
+            .rev()
+            .map(|&e| (e.clone(), 0))
+            .collect();
 
         while let Some((entry, depth)) = stack.pop() {
             result.push((entry.clone(), 0));
@@ -995,7 +1000,6 @@ impl AppState {
             self.navigation.set_filter(Some(query), &self.all_entries);
         }
     }
-
 }
 
 // --------------------------------------------------------------------------
@@ -1120,7 +1124,9 @@ mod tests {
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
 
-        state.navigation.set_filter(Some(String::from("main")), &state.all_entries);
+        state
+            .navigation
+            .set_filter(Some(String::from("main")), &state.all_entries);
         let filtered = state.visible_items();
         assert_eq!(filtered.len(), 1);
         assert!(filtered[0].0.path.ends_with(PathBuf::from("src/main.rs")));
@@ -1142,7 +1148,9 @@ mod tests {
 
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
-        state.navigation.set_filter(Some(String::from("app")), &state.all_entries);
+        state
+            .navigation
+            .set_filter(Some(String::from("app")), &state.all_entries);
 
         let visible = state.visible_items();
         assert_eq!(visible.len(), 1);
@@ -1180,7 +1188,9 @@ mod tests {
 
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
-        state.navigation.set_filter(Some(String::from("main.rs")), &state.all_entries);
+        state
+            .navigation
+            .set_filter(Some(String::from("main.rs")), &state.all_entries);
         let filtered = state.visible_items();
 
         assert_eq!(filtered.len(), 1);
@@ -1234,7 +1244,9 @@ mod tests {
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
 
-        state.navigation.update_items(vec![mock_dir_entry(file_path.clone(), 12, false)]);
+        state
+            .navigation
+            .update_items(vec![mock_dir_entry(file_path.clone(), 12, false)]);
         state.navigation.set_cursor(0);
 
         assert!(state.preview_lines().is_empty());
@@ -1261,12 +1273,16 @@ mod tests {
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
 
-        state.navigation.set_filter(Some(String::from("mrs")), &state.all_entries);
+        state
+            .navigation
+            .set_filter(Some(String::from("mrs")), &state.all_entries);
         let matches_mrs = state.visible_items();
         assert_eq!(matches_mrs.len(), 1);
         assert_eq!(matches_mrs[0].0.path, main_path);
 
-        state.navigation.set_filter(Some(String::from("crgo")), &state.all_entries);
+        state
+            .navigation
+            .set_filter(Some(String::from("crgo")), &state.all_entries);
         let matches_crgo = state.visible_items();
         assert_eq!(matches_crgo.len(), 1);
         assert_eq!(matches_crgo[0].0.path, cargo_path);
@@ -1297,7 +1313,9 @@ mod tests {
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
 
-        state.navigation.set_filter(Some(String::from("nonexistent")), &state.all_entries);
+        state
+            .navigation
+            .set_filter(Some(String::from("nonexistent")), &state.all_entries);
         let filtered = state.visible_items();
         assert!(filtered.is_empty());
     }
@@ -1329,13 +1347,22 @@ mod tests {
 
         state.navigation.update_items(vec![e1.clone(), e2.clone()]);
 
-        assert_eq!(state.navigation.visible_items()[0].path, PathBuf::from("a_file"));
+        assert_eq!(
+            state.navigation.visible_items()[0].path,
+            PathBuf::from("a_file")
+        );
 
         state.navigation.set_sort_mode(SortMode::NameAsc);
-        assert_eq!(state.navigation.visible_items()[0].path, PathBuf::from("a_file"));
+        assert_eq!(
+            state.navigation.visible_items()[0].path,
+            PathBuf::from("a_file")
+        );
 
         state.navigation.set_sort_mode(SortMode::MtimeDesc);
-        assert_eq!(state.navigation.visible_items()[0].path, PathBuf::from("a_file"));
+        assert_eq!(
+            state.navigation.visible_items()[0].path,
+            PathBuf::from("a_file")
+        );
 
         state.navigation.set_sort_mode(SortMode::SizeDesc);
         state.cycle_sort_mode();
@@ -1520,7 +1547,9 @@ mod tests {
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
 
-        state.navigation.update_items(vec![mock_dir_entry(f1.clone(), 0, false)]);
+        state
+            .navigation
+            .update_items(vec![mock_dir_entry(f1.clone(), 0, false)]);
         state.navigation.set_cursor(0);
 
         assert!(state.selected_paths.is_empty());
@@ -1550,7 +1579,9 @@ mod tests {
         wait_for_scan(&mut state);
 
         // Mock current item
-        state.navigation.update_items(vec![mock_dir_entry(file_path.clone(), 12, false)]);
+        state
+            .navigation
+            .update_items(vec![mock_dir_entry(file_path.clone(), 12, false)]);
         state.navigation.set_cursor(0);
 
         state.yank_full_path();
@@ -1585,7 +1616,9 @@ mod tests {
         let mut state = AppState::new(dst_dir.clone());
         wait_for_scan(&mut state);
 
-        state.navigation.update_items(vec![mock_dir_entry(file_path.clone(), 11, false)]);
+        state
+            .navigation
+            .update_items(vec![mock_dir_entry(file_path.clone(), 11, false)]);
         state.navigation.set_cursor(0);
 
         state.cut_file();
@@ -1612,7 +1645,9 @@ mod tests {
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
 
-        state.navigation.update_items(vec![mock_dir_entry(file_path.clone(), 14, false)]);
+        state
+            .navigation
+            .update_items(vec![mock_dir_entry(file_path.clone(), 14, false)]);
         state.navigation.set_cursor(0);
 
         state.request_rename();
@@ -1640,7 +1675,9 @@ mod tests {
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
 
-        state.navigation.update_items(vec![mock_dir_entry(file_path.clone(), 0, false)]);
+        state
+            .navigation
+            .update_items(vec![mock_dir_entry(file_path.clone(), 0, false)]);
         state.navigation.set_cursor(0);
 
         state.request_delete();
