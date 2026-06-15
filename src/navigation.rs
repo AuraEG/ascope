@@ -210,3 +210,167 @@ impl Navigation {
         self.filter_cache.borrow_mut().results.clear();
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    fn mock_entry(name: &str) -> DirEntry {
+        DirEntry {
+            path: PathBuf::from(name),
+            size: 0,
+            entry_type: EntryType::File,
+            mtime: SystemTime::now(),
+            display_path: name.to_string(),
+            symlink_target: None,
+        }
+    }
+
+    fn mock_dir_entry(name: &str) -> DirEntry {
+        DirEntry {
+            path: PathBuf::from(name),
+            size: 0,
+            entry_type: EntryType::Directory,
+            mtime: SystemTime::now(),
+            display_path: name.to_string(),
+            symlink_target: None,
+        }
+    }
+
+    fn mock_entry_sized(name: &str, size: u64) -> DirEntry {
+        DirEntry {
+            path: PathBuf::from(name),
+            size,
+            entry_type: EntryType::File,
+            mtime: SystemTime::now(),
+            display_path: name.to_string(),
+            symlink_target: None,
+        }
+    }
+
+    #[test]
+    fn test_cursor_moves_down() {
+        let items = vec![mock_entry("a"), mock_entry("b"), mock_entry("c")];
+        let mut nav = Navigation::new(items, crate::app::SortMode::NameAsc);
+        
+        nav.move_cursor(Direction::Down);
+        assert_eq!(nav.cursor, 1);
+    }
+
+    #[test]
+    fn test_cursor_stays_at_bottom() {
+        let items = vec![mock_entry("a"), mock_entry("b")];
+        let mut nav = Navigation::new(items, crate::app::SortMode::NameAsc);
+        nav.cursor = 1;
+        
+        nav.move_cursor(Direction::Down);
+        assert_eq!(nav.cursor, 1);
+    }
+
+    #[test]
+    fn test_cursor_moves_up() {
+        let items = vec![mock_entry("a"), mock_entry("b"), mock_entry("c")];
+        let mut nav = Navigation::new(items, crate::app::SortMode::NameAsc);
+        nav.cursor = 2;
+        
+        nav.move_cursor(Direction::Up);
+        assert_eq!(nav.cursor, 1);
+    }
+
+    #[test]
+    fn test_cursor_first_last() {
+        let items = vec![mock_entry("a"), mock_entry("b"), mock_entry("c")];
+        let mut nav = Navigation::new(items, crate::app::SortMode::NameAsc);
+        
+        nav.move_cursor(Direction::Last);
+        assert_eq!(nav.cursor, 2);
+        
+        nav.move_cursor(Direction::First);
+        assert_eq!(nav.cursor, 0);
+    }
+
+    #[test]
+    fn test_filter_narrows_visible_items() {
+        let items = vec![
+            mock_entry("src/main.rs"),
+            mock_entry("tests/test.rs"),
+            mock_entry("README.md"),
+        ];
+        let mut nav = Navigation::new(items, crate::app::SortMode::NameAsc);
+        
+        nav.set_filter(Some("src".to_string()));
+        assert_eq!(nav.visible_items().len(), 1);
+        assert!(nav.visible_items()[0].display_path.contains("src"));
+    }
+
+    #[test]
+    fn test_clear_filter_shows_all() {
+        let items = vec![
+            mock_entry("src/main.rs"),
+            mock_entry("tests/test.rs"),
+        ];
+        let mut nav = Navigation::new(items, crate::app::SortMode::NameAsc);
+        
+        nav.set_filter(Some("src".to_string()));
+        assert_eq!(nav.visible_items().len(), 1);
+        
+        nav.set_filter(None);
+        assert_eq!(nav.visible_items().len(), 2);
+    }
+
+    #[test]
+    fn test_enter_directory_returns_action() {
+        let items = vec![mock_dir_entry("subdir")];
+        let mut nav = Navigation::new(items, crate::app::SortMode::NameAsc);
+        
+        let action = nav.enter_selected();
+        match action {
+            NavigationAction::EnterDirectory(path) => assert!(path.ends_with("subdir")),
+            _ => panic!("Expected EnterDirectory action"),
+        }
+    }
+
+    #[test]
+    fn test_enter_file_returns_action() {
+        let items = vec![mock_entry("file.txt")];
+        let mut nav = Navigation::new(items, crate::app::SortMode::NameAsc);
+        
+        let action = nav.enter_selected();
+        match action {
+            NavigationAction::OpenFile(path) => assert!(path.ends_with("file.txt")),
+            _ => panic!("Expected OpenFile action"),
+        }
+    }
+
+    #[test]
+    fn test_toggle_expansion() {
+        let items = vec![mock_dir_entry("subdir")];
+        let mut nav = Navigation::new(items, crate::app::SortMode::NameAsc);
+        
+        let path = PathBuf::from("subdir");
+        assert!(!nav.is_expanded(&path));
+        
+        nav.toggle_expand_selected();
+        assert!(nav.is_expanded(&path));
+        
+        nav.toggle_expand_selected();
+        assert!(!nav.is_expanded(&path));
+    }
+
+    #[test]
+    fn test_sorting_by_size() {
+        let items = vec![
+            mock_entry_sized("large", 1000),
+            mock_entry_sized("small", 10),
+            mock_entry_sized("medium", 500),
+        ];
+        let mut nav = Navigation::new(items, crate::app::SortMode::SizeDesc);
+        
+        let visible = nav.visible_items();
+        assert_eq!(visible[0].size, 1000);
+        assert_eq!(visible[1].size, 500);
+        assert_eq!(visible[2].size, 10);
+    }
+}
