@@ -437,7 +437,11 @@ fn main() {
                     println!("{}", serde_json::to_string_pretty(&stats).unwrap());
                 } else {
                     println!("Scan Path : {:?}", args.path);
-                    println!("Total Size: {} bytes", stats.total_size);
+                    println!(
+                        "Total Size: {} bytes ({})",
+                        stats.total_size,
+                        fs::walker::format_size(stats.total_size)
+                    );
                     println!("File Count: {}", stats.file_count);
                 }
             }

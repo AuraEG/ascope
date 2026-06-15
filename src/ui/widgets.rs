@@ -429,8 +429,6 @@ fn render_tree(f: &mut Frame, state: &AppState, area: Rect) {
             if let Some(target) = &entry.symlink_target {
                 name = format!("{} -> {}", name, target.display());
             }
-            #[allow(clippy::cast_precision_loss)]
-            let size_mb = size as f64 / 1_000_000.0;
 
             let is_yanked = state.yanked_files.contains(path);
             let is_cut = state.cut_files.contains(path);
@@ -504,7 +502,18 @@ fn render_tree(f: &mut Frame, state: &AppState, area: Rect) {
             let icon_style = get_icon_style(path, entry_type);
             spans.push(Span::styled(format!("{icon} "), icon_style));
 
-            spans.push(Span::raw(format!("{name} ({size_mb:.2} MB)")));
+            if size == u64::MAX {
+                spans.push(Span::raw(name));
+            } else {
+                spans.push(Span::raw(name));
+                let size_str = crate::fs::walker::format_size(size);
+                let size_style = if actual_idx == state.navigation.cursor() {
+                    Style::default().fg(Color::Rgb(160, 160, 160))
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                spans.push(Span::styled(format!(" ({size_str})"), size_style));
+            }
 
             if is_yanked {
                 spans.push(Span::styled(
@@ -984,10 +993,9 @@ fn render_status_bar(f: &mut Frame, state: &AppState, area: Rect) {
     spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
 
     // 3. Total Size
-    #[allow(clippy::cast_precision_loss)]
-    let total_mb = state.total_size() as f64 / 1_000_000.0;
+    let total_size_str = crate::fs::walker::format_size(state.total_size());
     spans.push(Span::styled(
-        format!(" {:.2} MB ", total_mb),
+        format!(" {total_size_str} "),
         Style::default().fg(Color::Green),
     ));
     spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
