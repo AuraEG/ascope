@@ -8,6 +8,8 @@ pub mod ui;
 pub mod plugin {
     pub mod commands;
     pub mod manifest;
+    pub mod engine;
 }
+
 
 
