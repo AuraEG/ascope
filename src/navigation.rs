@@ -100,6 +100,13 @@ impl Navigation {
         self.cursor = cursor.min(max_idx);
     }
 
+    pub fn select_path(&mut self, path: &Path) {
+        let visible = self.visible_items();
+        if let Some(idx) = visible.iter().position(|entry| entry.path == path) {
+            self.cursor = idx;
+        }
+    }
+
     pub fn visible_items(&self) -> Vec<&DirEntry> {
         if let Some(ref filtered) = self.filtered_items {
             filtered.iter().map(|(entry, _)| entry).collect()
@@ -382,5 +389,17 @@ mod tests {
         assert_eq!(visible[0].size, 1000);
         assert_eq!(visible[1].size, 500);
         assert_eq!(visible[2].size, 10);
+    }
+
+    #[test]
+    fn test_select_path() {
+        let items = vec![mock_entry("a"), mock_entry("b"), mock_entry("c")];
+        let mut nav = Navigation::new(items, crate::app::SortMode::NameAsc);
+
+        nav.select_path(&std::path::PathBuf::from("c"));
+        assert_eq!(nav.cursor, 2);
+
+        nav.select_path(&std::path::PathBuf::from("a"));
+        assert_eq!(nav.cursor, 0);
     }
 }

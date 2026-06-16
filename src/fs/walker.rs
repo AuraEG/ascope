@@ -67,6 +67,95 @@ pub enum ScanProgress {
     Complete,
 }
 
+/// Quickly scan immediate children of a directory (non-recursively).
+/// Directory entry sizes are set to `u64::MAX` as a placeholder for uncalculated size.
+pub fn scan_immediate(root: &Path) -> Result<Vec<DirEntry>, std::io::Error> {
+    let mut entries = Vec::new();
+    let read_dir = std::fs::read_dir(root)?;
+    for entry in read_dir {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        // Skip hidden files/directories (starting with '.')
+        if let Some(name) = path.file_name() {
+            if name.to_string_lossy().starts_with('.') {
+                continue;
+            }
+        }
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        let entry_type = if file_type.is_symlink() {
+            EntryType::Symlink
+        } else if file_type.is_dir() {
+            EntryType::Directory
+        } else {
+            EntryType::File
+        };
+
+        let size = if entry_type == EntryType::File {
+            entry.metadata().map(|m| m.len()).unwrap_or(0)
+        } else {
+            u64::MAX // Placeholder for directories
+        };
+
+        let mtime = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+
+        let symlink_target = if entry_type == EntryType::Symlink {
+            std::fs::read_link(&path).ok()
+        } else {
+            None
+        };
+
+        let display_path = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+
+        entries.push(DirEntry {
+            path,
+            size,
+            entry_type,
+            mtime,
+            display_path,
+            symlink_target,
+        });
+    }
+    Ok(entries)
+}
+
+/// Formats bytes into a human-readable size string (B, KB, MB, GB, TB).
+pub fn format_size(bytes: u64) -> String {
+    if bytes == u64::MAX {
+        return "Calculating...".to_string();
+    }
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    const GB: u64 = 1024 * 1024 * 1024;
+    const TB: u64 = 1024 * 1024 * 1024 * 1024;
+
+    #[allow(clippy::cast_precision_loss)]
+    if bytes >= TB {
+        format!("{:.2} TB", bytes as f64 / TB as f64)
+    } else if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 /// Kick off a background thread that calls [`scan_path`] and writes results
 /// into the supplied shared handles.  Returns immediately; the caller must
 /// poll `progress_out` to know when the data is ready.
@@ -99,7 +188,7 @@ pub fn scan_path_async(
 // --------------------------------------------------------------------------
 
 /// Recursively scan `root`, skipping hidden entries, and return aggregated
-/// [`PathStats`]. Uses jwalk's parallel work-stealing traversal internally.
+/// [`PathStats`]. Uses jwalk's serial traversal in the background to avoid CPU thread starvation.
 pub fn scan_path(root: &Path) -> Result<PathStats, std::io::Error> {
     let mut total_size: u64 = 0;
     let mut file_count: u64 = 0;
@@ -109,8 +198,10 @@ pub fn scan_path(root: &Path) -> Result<PathStats, std::io::Error> {
     let mut temp_entries = Vec::new();
     let mut dir_sizes: HashMap<PathBuf, u64> = HashMap::new();
 
+    // 1. Walk the directory tree serially (caps CPU usage to 1 core, preventing lag)
     for entry in WalkDir::new(root)
         .skip_hidden(true)
+        .parallelism(jwalk::Parallelism::Serial)
         .into_iter()
         .filter_map(Result::ok)
     {
@@ -150,18 +241,36 @@ pub fn scan_path(root: &Path) -> Result<PathStats, std::io::Error> {
             total_size += size;
             file_count += 1;
 
-            // Add size to all ancestor directories up to `root`
-            let mut parent = path.parent();
-            while let Some(p) = parent {
-                if !p.starts_with(root) || p == root {
-                    break;
+            // Attribute file size directly to its immediate parent directory
+            if let Some(parent) = path.parent() {
+                if parent.starts_with(root) && parent != root {
+                    *dir_sizes.entry(parent.to_path_buf()).or_insert(0) += size;
                 }
-                *dir_sizes.entry(p.to_path_buf()).or_insert(0) += size;
-                parent = p.parent();
             }
         }
 
         temp_entries.push((path.to_path_buf(), entry_type, size, mtime, symlink_target));
+    }
+
+    // 2. Propagate sizes upwards (from deepest subdirectories up to root).
+    // This reduces hashmap lookups and heap allocations from O(N * D) to O(N + M)
+    // where N is files and M is directories.
+    let mut dirs: Vec<PathBuf> = temp_entries
+        .iter()
+        .filter(|(_, entry_type, _, _, _)| *entry_type == EntryType::Directory)
+        .map(|(path, _, _, _, _)| path.clone())
+        .collect();
+
+    // Sort by path length descending (deepest directories first)
+    dirs.sort_by_key(|p| std::cmp::Reverse(p.as_os_str().len()));
+
+    for dir in dirs {
+        let size = *dir_sizes.get(&dir).unwrap_or(&0);
+        if let Some(parent) = dir.parent() {
+            if parent.starts_with(root) && parent != root {
+                *dir_sizes.entry(parent.to_path_buf()).or_insert(0) += size;
+            }
+        }
     }
 
     // Populate direct subdirectory sizes for `subdirs`
@@ -305,5 +414,33 @@ mod tests {
 
         let pkg_src_entry = stats.all_entries.iter().find(|e| e.path == subsub).unwrap();
         assert_eq!(pkg_src_entry.size, 12);
+    }
+
+    #[test]
+    fn test_scan_immediate() {
+        let dir = tempdir().unwrap();
+        let file_path1 = dir.path().join("file1.txt");
+        let sub_dir = dir.path().join("subdir");
+        std::fs::create_dir(&sub_dir).unwrap();
+
+        {
+            let mut f1 = File::create(file_path1).unwrap();
+            f1.write_all(b"hello").unwrap(); // 5 bytes
+        }
+
+        let entries = scan_immediate(dir.path()).unwrap();
+        assert_eq!(entries.len(), 2);
+
+        let file_entry = entries
+            .iter()
+            .find(|e| e.entry_type == EntryType::File)
+            .unwrap();
+        assert_eq!(file_entry.size, 5);
+
+        let dir_entry = entries
+            .iter()
+            .find(|e| e.entry_type == EntryType::Directory)
+            .unwrap();
+        assert_eq!(dir_entry.size, u64::MAX);
     }
 }
