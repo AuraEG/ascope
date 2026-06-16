@@ -145,7 +145,8 @@ impl AppState {
             config.save();
         }
 
-        let mut plugin_engine = crate::plugin::engine::PluginEngine::new(root.join(".config/ascope/plugins")).ok();
+        let mut plugin_engine =
+            crate::plugin::engine::PluginEngine::new(root.join(".config/ascope/plugins")).ok();
         if let Some(ref mut engine) = plugin_engine {
             let _ = engine.load_plugins();
         }
@@ -616,6 +617,19 @@ impl AppState {
 
         self.record_navigation(path);
         self.save_active_tab();
+    }
+
+    pub fn execute_plugin_command(&mut self, cmd: crate::plugin::commands::PluginCommand) {
+        match cmd {
+            crate::plugin::commands::PluginCommand::FocusPath { path } => {
+                self.jump_to_path(std::path::PathBuf::from(path));
+            }
+            crate::plugin::commands::PluginCommand::ExecShell { cmd } => {
+                // Execute shell command in background
+                let _ = std::process::Command::new("sh").arg("-c").arg(cmd).spawn();
+            }
+            crate::plugin::commands::PluginCommand::None => {}
+        }
     }
 
     // Helper to copy text to system clipboard.

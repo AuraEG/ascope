@@ -11,7 +11,7 @@ pub struct PluginEngine {
 impl PluginEngine {
     pub fn new(plugin_dir: PathBuf) -> Result<Self, mlua::Error> {
         let lua = Lua::new();
-        
+
         // Inject global api table
         let ascope_api = lua.create_table()?;
         lua.globals().set("ascope", ascope_api)?;
