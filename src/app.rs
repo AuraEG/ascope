@@ -98,6 +98,7 @@ pub struct AppState {
     pub show_help: bool,
     /// Selected index inside the help modal
     pub help_selected_index: usize,
+    pub plugin_engine: Option<crate::plugin::engine::PluginEngine>,
 }
 
 // --------------------------------------------------------------------------
@@ -142,6 +143,11 @@ impl AppState {
                 config.recent.pop_back();
             }
             config.save();
+        }
+
+        let mut plugin_engine = crate::plugin::engine::PluginEngine::new(root.join(".config/ascope/plugins")).ok();
+        if let Some(ref mut engine) = plugin_engine {
+            let _ = engine.load_plugins();
         }
 
         let initial_tab = Tab {
@@ -190,6 +196,7 @@ impl AppState {
             delete_targets: Vec::new(),
             show_help: false,
             help_selected_index: 0,
+            plugin_engine,
         }
     }
 
