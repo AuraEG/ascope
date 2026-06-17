@@ -262,6 +262,7 @@ impl AppState {
 
             // Use Navigation to update items (handles sorting automatically)
             self.navigation.update_items(new_items);
+            self.sync_navigation_items();
             self.scan_applied = true;
 
             // Restore selection
@@ -283,6 +284,7 @@ impl AppState {
             SortMode::MtimeDesc => SortMode::SizeDesc,
         };
         self.navigation.set_sort_mode(next_mode);
+        self.sync_navigation_items();
     }
 
     pub fn detect_preview_type(&self, path: &std::path::Path) -> PreviewType {
@@ -354,6 +356,7 @@ impl AppState {
     /// Toggle the expansion state of the currently selected directory.
     pub fn toggle_expand(&mut self) {
         self.navigation.toggle_expand_selected();
+        self.sync_navigation_items();
     }
 
     fn get_children(&self, parent_path: &std::path::Path) -> Vec<DirEntry> {
@@ -385,17 +388,16 @@ impl AppState {
 
     fn build_expanded_tree(&self) -> Vec<(DirEntry, u32)> {
         let mut result = Vec::new();
-        // Start with top-level items from Navigation (which are already sorted)
-        let mut stack: Vec<(DirEntry, usize)> = self
-            .navigation
-            .visible_items()
-            .iter()
-            .rev()
-            .map(|&e| (e.clone(), 0))
+        // Start with top-level items from the current directory, sorted according to active sort mode
+        let mut top_level = self.get_children(&self.current_path);
+        top_level.reverse(); // reverse for stack popping order
+        let mut stack: Vec<(DirEntry, u32)> = top_level
+            .into_iter()
+            .map(|e| (e, 0))
             .collect();
 
         while let Some((entry, depth)) = stack.pop() {
-            result.push((entry.clone(), 0));
+            result.push((entry.clone(), depth));
             if entry.entry_type == EntryType::Directory && self.navigation.is_expanded(&entry.path)
             {
                 // Get children of this directory, sorted in reverse order so that when popped from stack they come out in correct order
@@ -407,6 +409,18 @@ impl AppState {
             }
         }
         result
+    }
+
+    pub fn sync_navigation_items(&mut self) {
+        if self.navigation.filter_query().is_none() {
+            let tree = self.build_expanded_tree();
+            let flat_items: Vec<DirEntry> = tree.into_iter().map(|(entry, _)| entry).collect();
+            let selected_path = self.navigation.current_selection().map(|e| e.path.clone());
+            self.navigation.update_items_raw(flat_items);
+            if let Some(path) = selected_path {
+                self.navigation.select_path(&path);
+            }
+        }
     }
 
     /// Descend into the currently selected sub-directory and rescan inside the active tab.
@@ -1019,6 +1033,7 @@ impl AppState {
     /// Clear the active query and reset the cursor to the first visible row.
     pub fn clear_search(&mut self) {
         self.navigation.set_filter(None, &self.all_entries);
+        self.sync_navigation_items();
     }
 
     /// Append one typed character to the live query.
@@ -1034,6 +1049,7 @@ impl AppState {
         query.pop();
         if query.is_empty() {
             self.navigation.set_filter(None, &self.all_entries);
+            self.sync_navigation_items();
         } else {
             self.navigation.set_filter(Some(query), &self.all_entries);
         }
@@ -1739,4 +1755,65 @@ mod tests {
         state.show_help = true;
         assert!(state.show_help);
     }
+
+    #[test]
+    fn test_tree_cursor_movement_and_selection() {
+        let dir = tempdir().unwrap();
+        let sub1 = dir.path().join("dir1");
+        let sub2 = dir.path().join("dir2");
+        std::fs::create_dir(&sub1).unwrap();
+        std::fs::create_dir(&sub2).unwrap();
+
+        let file1 = sub1.join("file1.txt");
+        {
+            let mut f = File::create(&file1).unwrap();
+            f.write_all(b"content").unwrap();
+        }
+
+        let mut state = AppState::new(dir.path().to_path_buf());
+        wait_for_scan(&mut state);
+
+        // Ensure NameAsc sort mode to keep order predictable: dir1 then dir2
+        state.navigation.set_sort_mode(SortMode::NameAsc);
+
+        // Initial visible items should be dir1, dir2
+        let visible = state.visible_items();
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible[0].0.path, sub1);
+        assert_eq!(visible[1].0.path, sub2);
+
+        // Cursor starts at 0 (selecting dir1)
+        assert_eq!(state.navigation.cursor(), 0);
+        assert_eq!(state.selected_item().unwrap().path, sub1);
+
+        // Toggle expand dir1
+        state.toggle_expand();
+
+        // Now visible items should be dir1, dir1/file1.txt, dir2
+        let visible_expanded = state.visible_items();
+        assert_eq!(visible_expanded.len(), 3);
+        assert_eq!(visible_expanded[0].0.path, sub1);
+        assert_eq!(visible_expanded[1].0.path, file1);
+        assert_eq!(visible_expanded[2].0.path, sub2);
+
+        // Cursor should still be on dir1 (0)
+        assert_eq!(state.navigation.cursor(), 0);
+        assert_eq!(state.selected_item().unwrap().path, sub1);
+
+        // Move cursor down -> should select file1.txt (1)
+        state.navigation.move_cursor(crate::navigation::Direction::Down);
+        assert_eq!(state.navigation.cursor(), 1);
+        assert_eq!(state.selected_item().unwrap().path, file1);
+
+        // Move cursor down -> should select dir2 (2)
+        state.navigation.move_cursor(crate::navigation::Direction::Down);
+        assert_eq!(state.navigation.cursor(), 2);
+        assert_eq!(state.selected_item().unwrap().path, sub2);
+
+        // Move cursor down again -> should stay at dir2 (2)
+        state.navigation.move_cursor(crate::navigation::Direction::Down);
+        assert_eq!(state.navigation.cursor(), 2);
+        assert_eq!(state.selected_item().unwrap().path, sub2);
+    }
 }
+
