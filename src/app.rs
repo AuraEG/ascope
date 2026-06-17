@@ -36,6 +36,13 @@ pub enum ModalMode {
     DeleteConfirmation,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewType {
+    Text,
+    Image,
+    Unsupported,
+}
+
 use crate::fs::walker::{DirEntry, EntryType};
 
 /// Represents a single directory view tab with its own navigation history and search query.
@@ -276,6 +283,18 @@ impl AppState {
             SortMode::MtimeDesc => SortMode::SizeDesc,
         };
         self.navigation.set_sort_mode(next_mode);
+    }
+
+    pub fn detect_preview_type(&self, path: &std::path::Path) -> PreviewType {
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            match ext.to_lowercase().as_str() {
+                "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "ico" => PreviewType::Image,
+                "pdf" | "zip" | "tar" | "gz" | "7z" | "rar" | "bin" | "exe" | "dll" | "so" | "dylib" | "dmg" | "iso" | "docx" | "xlsx" | "pptx" => PreviewType::Unsupported,
+                _ => PreviewType::Text,
+            }
+        } else {
+            PreviewType::Text
+        }
     }
 
     /// Check if the currently highlighted item is a file and update the
