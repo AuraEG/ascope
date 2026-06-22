@@ -138,6 +138,7 @@ pub struct AppState {
     /// Selected index inside the help modal
     pub help_selected_index: usize,
     pub plugin_engine: Option<crate::plugin::engine::PluginEngine>,
+    pub last_selection_time: std::time::Instant,
 }
 
 // --------------------------------------------------------------------------
@@ -382,6 +383,7 @@ impl AppState {
             show_help: false,
             help_selected_index: 0,
             plugin_engine,
+            last_selection_time: std::time::Instant::now(),
         }
     }
 
@@ -462,6 +464,7 @@ impl AppState {
         };
         self.navigation.set_sort_mode(next_mode);
         self.sync_navigation_items();
+        self.reset_selection_timeout();
     }
 
     pub fn detect_preview_type(&self, path: &std::path::Path) -> PreviewType {
@@ -578,6 +581,7 @@ impl AppState {
     pub fn toggle_expand(&mut self) {
         self.navigation.toggle_expand_selected();
         self.sync_navigation_items();
+        self.reset_selection_timeout();
     }
 
     fn get_children(&self, parent_path: &std::path::Path) -> Vec<DirEntry> {
@@ -663,6 +667,7 @@ impl AppState {
 
                 self.record_navigation(path);
                 self.save_active_tab();
+                self.reset_selection_timeout();
             }
         }
     }
@@ -688,6 +693,7 @@ impl AppState {
 
             self.record_navigation(path);
             self.save_active_tab();
+            self.reset_selection_timeout();
         }
     }
 
@@ -707,6 +713,10 @@ impl AppState {
         }
     }
 
+    pub fn reset_selection_timeout(&mut self) {
+        self.last_selection_time = std::time::Instant::now();
+    }
+
     /// Load the specified tab index state values into the AppState active fields.
     pub fn load_tab(&mut self, index: usize) {
         if index < self.tabs.len() {
@@ -721,6 +731,7 @@ impl AppState {
             self.git_ctx = tab.git_ctx.clone();
             self.active_tab = index;
             *self.last_rendered_image.lock().unwrap() = None;
+            self.reset_selection_timeout();
         }
     }
 
@@ -869,6 +880,7 @@ impl AppState {
 
         self.record_navigation(path);
         self.save_active_tab();
+        self.reset_selection_timeout();
     }
 
     pub fn execute_plugin_command(&mut self, cmd: crate::plugin::commands::PluginCommand) {
@@ -1241,6 +1253,7 @@ impl AppState {
             idx as usize
         };
         self.navigation.set_cursor(new_idx);
+        self.reset_selection_timeout();
     }
 
     /// Toggle search-mode focus. Leaving search mode preserves the query so the
@@ -1253,6 +1266,7 @@ impl AppState {
     pub fn clear_search(&mut self) {
         self.navigation.set_filter(None, &self.all_entries);
         self.sync_navigation_items();
+        self.reset_selection_timeout();
     }
 
     /// Append one typed character to the live query.
@@ -1260,6 +1274,7 @@ impl AppState {
         let mut query = self.navigation.filter_query().unwrap_or("").to_string();
         query.push(ch);
         self.navigation.set_filter(Some(query), &self.all_entries);
+        self.reset_selection_timeout();
     }
 
     /// Delete the most recent search character.
@@ -1272,6 +1287,7 @@ impl AppState {
         } else {
             self.navigation.set_filter(Some(query), &self.all_entries);
         }
+        self.reset_selection_timeout();
     }
 }
 

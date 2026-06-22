@@ -111,7 +111,13 @@ fn event_loop(
         let preview_w = panes[1].width.saturating_sub(2);
         let preview_h = panes[1].height.saturating_sub(2);
 
-        state.update_preview_cache(preview_w, preview_h);
+        if state.last_selection_time.elapsed().as_millis() > 50 {
+            state.update_preview_cache(preview_w, preview_h);
+        } else {
+            // Poll async preview updates even if we don't fully refresh the cache,
+            // to make sure background workers can still deliver results.
+            state.poll_preview_updates();
+        }
         terminal.draw(|f| ui::widgets::render_dashboard(f, &state))?;
 
         match events.next()? {
