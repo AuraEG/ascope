@@ -96,7 +96,28 @@ fn event_loop(
     let events = ui::event::EventHandler::new(Duration::from_millis(16));
 
     loop {
-        state.update_preview_cache();
+        let size = terminal
+            .size()
+            .unwrap_or_else(|_| ratatui::prelude::Rect::new(0, 0, 80, 24));
+        let layout = ui::layout::build_layout(size, true, state.search_mode || state.rename_mode);
+        let panes = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([
+                ratatui::layout::Constraint::Percentage(50),
+                ratatui::layout::Constraint::Percentage(50),
+            ])
+            .split(layout.main_area);
+
+        let preview_w = panes[1].width.saturating_sub(2);
+        let preview_h = panes[1].height.saturating_sub(2);
+
+        if state.last_selection_time.elapsed().as_millis() > 50 {
+            state.update_preview_cache(preview_w, preview_h);
+        } else {
+            // Poll async preview updates even if we don't fully refresh the cache,
+            // to make sure background workers can still deliver results.
+            state.poll_preview_updates();
+        }
         terminal.draw(|f| ui::widgets::render_dashboard(f, &state))?;
 
         match events.next()? {

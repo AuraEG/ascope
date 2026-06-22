@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::fs::walker::{scan_immediate, scan_path_async, PathStats, ScanProgress};
 use crate::git::GitContext;
+use image::GenericImageView as _;
 use ratatui::text::Line;
 
 // --------------------------------------------------------------------------
@@ -36,6 +37,13 @@ pub enum ModalMode {
     DeleteConfirmation,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewType {
+    Text,
+    Image,
+    Unsupported,
+}
+
 use crate::fs::walker::{DirEntry, EntryType};
 
 /// Represents a single directory view tab with its own navigation history and search query.
@@ -50,6 +58,23 @@ pub struct Tab {
     pub git_ctx: Option<GitContext>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageRenderCache {
+    pub path: PathBuf,
+    pub area: ratatui::layout::Rect,
+    pub sequence: String,
+    pub protocol: crate::preview::TerminalProtocol,
+}
+
+#[derive(Debug)]
+pub struct PreviewTask {
+    pub path: PathBuf,
+    pub query: String,
+    pub width: u16,
+    pub height: u16,
+    pub protocol: crate::preview::TerminalProtocol,
+}
+
 /// Central state passed to every render call and mutated by keyboard events.
 pub struct AppState {
     pub current_path: PathBuf,
@@ -59,6 +84,20 @@ pub struct AppState {
     pub all_entries: Vec<DirEntry>,
     scan_applied: bool,
     preview_cache: Option<(PathBuf, String, Vec<Line<'static>>)>,
+    pub last_rendered_image: std::sync::Mutex<Option<ImageRenderCache>>,
+    pub preview_tx: std::sync::mpsc::Sender<(
+        PathBuf,
+        String,
+        Vec<Line<'static>>,
+        Option<ImageRenderCache>,
+    )>,
+    preview_rx: std::sync::mpsc::Receiver<(
+        PathBuf,
+        String,
+        Vec<Line<'static>>,
+        Option<ImageRenderCache>,
+    )>,
+    pub worker_tx: std::sync::mpsc::Sender<PreviewTask>,
     pub git_ctx: Option<GitContext>,
     pub search_mode: bool,
     pub tabs: Vec<Tab>,
@@ -99,6 +138,7 @@ pub struct AppState {
     /// Selected index inside the help modal
     pub help_selected_index: usize,
     pub plugin_engine: Option<crate::plugin::engine::PluginEngine>,
+    pub last_selection_time: std::time::Instant,
 }
 
 // --------------------------------------------------------------------------
@@ -165,6 +205,147 @@ impl AppState {
             git_ctx: git_ctx.clone(),
         };
 
+        let (preview_tx, preview_rx) = std::sync::mpsc::channel();
+        let (worker_tx, worker_rx) = std::sync::mpsc::channel::<PreviewTask>();
+
+        let tx_clone = preview_tx.clone();
+        std::thread::spawn(move || {
+            while let Ok(mut task) = worker_rx.recv() {
+                // Drain any newer tasks in the channel to keep only the absolute latest
+                while let Ok(newer) = worker_rx.try_recv() {
+                    task = newer;
+                }
+
+                // Process the task
+                let is_pdf = task
+                    .path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|s| s.to_lowercase())
+                    == Some("pdf".to_string());
+                let target_path = if is_pdf {
+                    match crate::preview::extract_pdf_first_page(&task.path) {
+                        Ok(p) => p,
+                        Err(err) => {
+                            let lines = vec![Line::from(format!("[x] PDF preview error: {err}"))];
+                            let _ = tx_clone.send((task.path, task.query, lines, None));
+                            continue;
+                        }
+                    }
+                } else {
+                    task.path.clone()
+                };
+
+                match task.protocol {
+                    crate::preview::TerminalProtocol::HalfBlock => {
+                        if *crate::preview::HAS_CHAFA {
+                            if let Ok(lines) = crate::preview::render_chafa_symbols(
+                                &target_path,
+                                task.width,
+                                task.height,
+                            ) {
+                                let _ = tx_clone.send((task.path, task.query, lines, None));
+                                continue;
+                            }
+                        }
+                        if let Ok(img) = image::open(&target_path) {
+                            let lines =
+                                crate::preview::render_half_block(&img, task.width, task.height);
+                            let _ = tx_clone.send((task.path, task.query, lines, None));
+                        } else {
+                            let lines = vec![Line::from("[Error loading image]")];
+                            let _ = tx_clone.send((task.path, task.query, lines, None));
+                        }
+                    }
+                    crate::preview::TerminalProtocol::Kitty => {
+                        let display_h = task.height.saturating_sub(1);
+                        if let Ok(img) = image::open(&target_path) {
+                            let resized =
+                                img.thumbnail(task.width as u32 * 12, display_h as u32 * 24);
+                            let mut png_bytes = Vec::new();
+                            let mut cursor = std::io::Cursor::new(&mut png_bytes);
+                            if resized
+                                .write_to(&mut cursor, image::ImageFormat::Png)
+                                .is_ok()
+                            {
+                                let (w, h) = resized.dimensions();
+                                let cols = (w / 12).max(1u32) as u16;
+                                let rows = (h / 24).max(1u32) as u16;
+                                let sequence =
+                                    crate::preview::build_kitty_sequence(&png_bytes, cols, rows);
+                                let cache = ImageRenderCache {
+                                    path: task.path.clone(),
+                                    area: ratatui::layout::Rect::new(0, 0, task.width, display_h),
+                                    sequence,
+                                    protocol: task.protocol,
+                                };
+                                let _ = tx_clone.send((task.path, task.query, vec![], Some(cache)));
+                                continue;
+                            }
+                        }
+                        let lines = vec![Line::from("[Error loading image]")];
+                        let _ = tx_clone.send((task.path, task.query, lines, None));
+                    }
+                    crate::preview::TerminalProtocol::Iterm2 => {
+                        let display_h = task.height.saturating_sub(1);
+                        if let Ok(img) = image::open(&target_path) {
+                            let resized =
+                                img.thumbnail(task.width as u32 * 16, display_h as u32 * 32);
+                            let mut jpeg_bytes = Vec::new();
+                            let mut cursor = std::io::Cursor::new(&mut jpeg_bytes);
+                            if resized
+                                .write_to(&mut cursor, image::ImageFormat::Jpeg)
+                                .is_ok()
+                            {
+                                let (w, h) = resized.dimensions();
+                                let cols = (w / 16).max(1u32) as u16;
+                                let rows = (h / 32).max(1u32) as u16;
+                                let sequence =
+                                    crate::preview::build_iterm2_sequence(&jpeg_bytes, cols, rows);
+                                let cache = ImageRenderCache {
+                                    path: task.path.clone(),
+                                    area: ratatui::layout::Rect::new(0, 0, task.width, display_h),
+                                    sequence,
+                                    protocol: task.protocol,
+                                };
+                                let _ = tx_clone.send((task.path, task.query, vec![], Some(cache)));
+                                continue;
+                            }
+                        }
+                        let lines = vec![Line::from("[Error loading image]")];
+                        let _ = tx_clone.send((task.path, task.query, lines, None));
+                    }
+                    crate::preview::TerminalProtocol::Sixel => {
+                        let display_h = task.height.saturating_sub(1);
+                        if *crate::preview::HAS_CHAFA {
+                            if let Ok(sequence) = crate::preview::build_sixel_sequence_via_chafa(
+                                &target_path,
+                                task.width,
+                                display_h,
+                            ) {
+                                let cache = ImageRenderCache {
+                                    path: task.path.clone(),
+                                    area: ratatui::layout::Rect::new(0, 0, task.width, display_h),
+                                    sequence,
+                                    protocol: task.protocol,
+                                };
+                                let _ = tx_clone.send((task.path, task.query, vec![], Some(cache)));
+                                continue;
+                            }
+                        }
+                        if let Ok(img) = image::open(&target_path) {
+                            let lines =
+                                crate::preview::render_half_block(&img, task.width, task.height);
+                            let _ = tx_clone.send((task.path, task.query, lines, None));
+                        } else {
+                            let lines = vec![Line::from("[Error loading image]")];
+                            let _ = tx_clone.send((task.path, task.query, lines, None));
+                        }
+                    }
+                }
+            }
+        });
+
         Self {
             current_path: root,
             active_stats,
@@ -176,6 +357,10 @@ impl AppState {
             all_entries: immediate_entries,
             scan_applied: false,
             preview_cache: None,
+            last_rendered_image: std::sync::Mutex::new(None),
+            preview_tx,
+            preview_rx,
+            worker_tx,
             git_ctx,
             search_mode: false,
             tabs: vec![initial_tab],
@@ -198,6 +383,7 @@ impl AppState {
             show_help: false,
             help_selected_index: 0,
             plugin_engine,
+            last_selection_time: std::time::Instant::now(),
         }
     }
 
@@ -255,6 +441,7 @@ impl AppState {
 
             // Use Navigation to update items (handles sorting automatically)
             self.navigation.update_items(new_items);
+            self.sync_navigation_items();
             self.scan_applied = true;
 
             // Restore selection
@@ -276,11 +463,45 @@ impl AppState {
             SortMode::MtimeDesc => SortMode::SizeDesc,
         };
         self.navigation.set_sort_mode(next_mode);
+        self.sync_navigation_items();
+        self.reset_selection_timeout();
+    }
+
+    pub fn detect_preview_type(&self, path: &std::path::Path) -> PreviewType {
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            match ext.to_lowercase().as_str() {
+                "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "ico" | "pdf" => {
+                    PreviewType::Image
+                }
+                "zip" | "tar" | "gz" | "7z" | "rar" | "bin" | "exe" | "dll" | "so" | "dylib"
+                | "dmg" | "iso" | "docx" | "xlsx" | "pptx" => PreviewType::Unsupported,
+                _ => PreviewType::Text,
+            }
+        } else {
+            PreviewType::Text
+        }
     }
 
     /// Check if the currently highlighted item is a file and update the
     /// preview cache if the selected file or search query has changed.
-    pub fn update_preview_cache(&mut self) {
+    /// Poll and apply asynchronous image/PDF preview updates.
+    pub fn poll_preview_updates(&mut self) {
+        while let Ok((path, query, lines, cache)) = self.preview_rx.try_recv() {
+            let selected = self.selected_item().map(|x| x.path);
+            let current_query = self.navigation.filter_query().unwrap_or("").to_string();
+
+            // Only apply the preview if it matches the currently highlighted item and search query
+            if Some(&path) == selected.as_ref() && current_query == query {
+                self.preview_cache = Some((path, query, lines));
+                *self.last_rendered_image.lock().unwrap() = cache;
+            }
+        }
+    }
+
+    pub fn update_preview_cache(&mut self, width: u16, height: u16) {
+        // Poll for asynchronous preview results first
+        self.poll_preview_updates();
+
         let selected = self.selected_item().map(|x| x.path);
         let query = self.navigation.filter_query().unwrap_or("").to_string();
 
@@ -292,13 +513,37 @@ impl AppState {
 
         if let Some(path) = selected {
             if path.is_file() {
+                let p_type = self.detect_preview_type(&path);
+                if p_type == PreviewType::Image {
+                    // Start loading in the background thread asynchronously
+                    self.preview_cache = Some((
+                        path.clone(),
+                        query.clone(),
+                        vec![Line::from("[Loading preview...]")],
+                    ));
+                    *self.last_rendered_image.lock().unwrap() = None;
+
+                    let protocol = crate::preview::detect_protocol();
+                    let task = PreviewTask {
+                        path: path.clone(),
+                        query: query.clone(),
+                        width,
+                        height,
+                        protocol,
+                    };
+                    let _ = self.worker_tx.send(task);
+                    return;
+                }
+
                 let lines = crate::ui::widgets::build_preview_lines(&path, &query);
                 self.preview_cache = Some((path, query, lines));
+                *self.last_rendered_image.lock().unwrap() = None;
                 return;
             }
         }
 
         self.preview_cache = None;
+        *self.last_rendered_image.lock().unwrap() = None;
     }
 
     /// Access the cached highlighted lines of the currently selected file.
@@ -335,6 +580,8 @@ impl AppState {
     /// Toggle the expansion state of the currently selected directory.
     pub fn toggle_expand(&mut self) {
         self.navigation.toggle_expand_selected();
+        self.sync_navigation_items();
+        self.reset_selection_timeout();
     }
 
     fn get_children(&self, parent_path: &std::path::Path) -> Vec<DirEntry> {
@@ -366,17 +613,13 @@ impl AppState {
 
     fn build_expanded_tree(&self) -> Vec<(DirEntry, u32)> {
         let mut result = Vec::new();
-        // Start with top-level items from Navigation (which are already sorted)
-        let mut stack: Vec<(DirEntry, usize)> = self
-            .navigation
-            .visible_items()
-            .iter()
-            .rev()
-            .map(|&e| (e.clone(), 0))
-            .collect();
+        // Start with top-level items from the current directory, sorted according to active sort mode
+        let mut top_level = self.get_children(&self.current_path);
+        top_level.reverse(); // reverse for stack popping order
+        let mut stack: Vec<(DirEntry, u32)> = top_level.into_iter().map(|e| (e, 0)).collect();
 
         while let Some((entry, depth)) = stack.pop() {
-            result.push((entry.clone(), 0));
+            result.push((entry.clone(), depth));
             if entry.entry_type == EntryType::Directory && self.navigation.is_expanded(&entry.path)
             {
                 // Get children of this directory, sorted in reverse order so that when popped from stack they come out in correct order
@@ -388,6 +631,18 @@ impl AppState {
             }
         }
         result
+    }
+
+    pub fn sync_navigation_items(&mut self) {
+        if self.navigation.filter_query().is_none() {
+            let tree = self.build_expanded_tree();
+            let flat_items: Vec<DirEntry> = tree.into_iter().map(|(entry, _)| entry).collect();
+            let selected_path = self.navigation.current_selection().map(|e| e.path.clone());
+            self.navigation.update_items_raw(flat_items);
+            if let Some(path) = selected_path {
+                self.navigation.select_path(&path);
+            }
+        }
     }
 
     /// Descend into the currently selected sub-directory and rescan inside the active tab.
@@ -412,6 +667,7 @@ impl AppState {
 
                 self.record_navigation(path);
                 self.save_active_tab();
+                self.reset_selection_timeout();
             }
         }
     }
@@ -437,6 +693,7 @@ impl AppState {
 
             self.record_navigation(path);
             self.save_active_tab();
+            self.reset_selection_timeout();
         }
     }
 
@@ -456,6 +713,10 @@ impl AppState {
         }
     }
 
+    pub fn reset_selection_timeout(&mut self) {
+        self.last_selection_time = std::time::Instant::now();
+    }
+
     /// Load the specified tab index state values into the AppState active fields.
     pub fn load_tab(&mut self, index: usize) {
         if index < self.tabs.len() {
@@ -469,6 +730,8 @@ impl AppState {
             self.preview_cache = tab.preview_cache.clone();
             self.git_ctx = tab.git_ctx.clone();
             self.active_tab = index;
+            *self.last_rendered_image.lock().unwrap() = None;
+            self.reset_selection_timeout();
         }
     }
 
@@ -617,6 +880,7 @@ impl AppState {
 
         self.record_navigation(path);
         self.save_active_tab();
+        self.reset_selection_timeout();
     }
 
     pub fn execute_plugin_command(&mut self, cmd: crate::plugin::commands::PluginCommand) {
@@ -989,6 +1253,7 @@ impl AppState {
             idx as usize
         };
         self.navigation.set_cursor(new_idx);
+        self.reset_selection_timeout();
     }
 
     /// Toggle search-mode focus. Leaving search mode preserves the query so the
@@ -1000,6 +1265,8 @@ impl AppState {
     /// Clear the active query and reset the cursor to the first visible row.
     pub fn clear_search(&mut self) {
         self.navigation.set_filter(None, &self.all_entries);
+        self.sync_navigation_items();
+        self.reset_selection_timeout();
     }
 
     /// Append one typed character to the live query.
@@ -1007,6 +1274,7 @@ impl AppState {
         let mut query = self.navigation.filter_query().unwrap_or("").to_string();
         query.push(ch);
         self.navigation.set_filter(Some(query), &self.all_entries);
+        self.reset_selection_timeout();
     }
 
     /// Delete the most recent search character.
@@ -1015,9 +1283,11 @@ impl AppState {
         query.pop();
         if query.is_empty() {
             self.navigation.set_filter(None, &self.all_entries);
+            self.sync_navigation_items();
         } else {
             self.navigation.set_filter(Some(query), &self.all_entries);
         }
+        self.reset_selection_timeout();
     }
 }
 
@@ -1270,14 +1540,14 @@ mod tests {
 
         assert!(state.preview_lines().is_empty());
 
-        state.update_preview_cache();
+        state.update_preview_cache(80, 24);
 
         let lines = state.preview_lines();
         assert!(!lines.is_empty());
         assert!(lines[0].to_string().contains("fn test()"));
 
         state.navigation.update_items(vec![]);
-        state.update_preview_cache();
+        state.update_preview_cache(80, 24);
         assert!(state.preview_lines().is_empty());
     }
 
@@ -1719,5 +1989,132 @@ mod tests {
 
         state.show_help = true;
         assert!(state.show_help);
+    }
+
+    #[test]
+    fn test_tree_cursor_movement_and_selection() {
+        let dir = tempdir().unwrap();
+        let sub1 = dir.path().join("dir1");
+        let sub2 = dir.path().join("dir2");
+        std::fs::create_dir(&sub1).unwrap();
+        std::fs::create_dir(&sub2).unwrap();
+
+        let file1 = sub1.join("file1.txt");
+        {
+            let mut f = File::create(&file1).unwrap();
+            f.write_all(b"content").unwrap();
+        }
+
+        let mut state = AppState::new(dir.path().to_path_buf());
+        wait_for_scan(&mut state);
+
+        // Ensure NameAsc sort mode to keep order predictable: dir1 then dir2
+        state.navigation.set_sort_mode(SortMode::NameAsc);
+
+        // Initial visible items should be dir1, dir2
+        let visible = state.visible_items();
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible[0].0.path, sub1);
+        assert_eq!(visible[1].0.path, sub2);
+
+        // Cursor starts at 0 (selecting dir1)
+        assert_eq!(state.navigation.cursor(), 0);
+        assert_eq!(state.selected_item().unwrap().path, sub1);
+
+        // Toggle expand dir1
+        state.toggle_expand();
+
+        // Now visible items should be dir1, dir1/file1.txt, dir2
+        let visible_expanded = state.visible_items();
+        assert_eq!(visible_expanded.len(), 3);
+        assert_eq!(visible_expanded[0].0.path, sub1);
+        assert_eq!(visible_expanded[1].0.path, file1);
+        assert_eq!(visible_expanded[2].0.path, sub2);
+
+        // Cursor should still be on dir1 (0)
+        assert_eq!(state.navigation.cursor(), 0);
+        assert_eq!(state.selected_item().unwrap().path, sub1);
+
+        // Move cursor down -> should select file1.txt (1)
+        state
+            .navigation
+            .move_cursor(crate::navigation::Direction::Down);
+        assert_eq!(state.navigation.cursor(), 1);
+        assert_eq!(state.selected_item().unwrap().path, file1);
+
+        // Move cursor down -> should select dir2 (2)
+        state
+            .navigation
+            .move_cursor(crate::navigation::Direction::Down);
+        assert_eq!(state.navigation.cursor(), 2);
+        assert_eq!(state.selected_item().unwrap().path, sub2);
+
+        // Move cursor down again -> should stay at dir2 (2)
+        state
+            .navigation
+            .move_cursor(crate::navigation::Direction::Down);
+        assert_eq!(state.navigation.cursor(), 2);
+        assert_eq!(state.selected_item().unwrap().path, sub2);
+    }
+
+    #[test]
+    fn test_image_and_pdf_preview_type_detection() {
+        let dir = tempdir().unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+
+        assert_eq!(
+            state.detect_preview_type(std::path::Path::new("image.png")),
+            PreviewType::Image
+        );
+        assert_eq!(
+            state.detect_preview_type(std::path::Path::new("doc.pdf")),
+            PreviewType::Image
+        );
+        assert_eq!(
+            state.detect_preview_type(std::path::Path::new("text.txt")),
+            PreviewType::Text
+        );
+    }
+
+    #[test]
+    fn test_image_preview_pipeline_integration() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test_image.png");
+        let mut f = File::create(&file_path).unwrap();
+        f.write_all(b"NOT_A_REAL_PNG_DATA").unwrap();
+
+        let mut state = AppState::new(dir.path().to_path_buf());
+        wait_for_scan(&mut state);
+
+        state
+            .navigation
+            .update_items(vec![mock_dir_entry(file_path.clone(), 12, false)]);
+        state.navigation.set_cursor(0);
+
+        state.update_preview_cache(80, 24);
+
+        let lines = state.preview_lines();
+        assert!(!lines.is_empty());
+        assert!(lines[0].to_string().contains("[Loading preview...]"));
+
+        let mut success = false;
+        for _ in 0..500 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            state.poll_preview_updates();
+            let updated_lines = state.preview_lines();
+            if !updated_lines.is_empty()
+                && !updated_lines[0]
+                    .to_string()
+                    .contains("[Loading preview...]")
+            {
+                assert!(
+                    updated_lines[0].to_string().contains("Error loading image")
+                        || updated_lines[0].to_string().contains("Preview error")
+                );
+                success = true;
+                break;
+            }
+        }
+        assert!(success, "Preview update timed out");
     }
 }

@@ -228,6 +228,15 @@ impl Navigation {
         }
         self.filtered_items = None;
     }
+
+    pub fn update_items_raw(&mut self, items: Vec<DirEntry>) {
+        self.items = items;
+        let visible_count = self.visible_items().len();
+        if self.cursor >= visible_count && visible_count > 0 {
+            self.cursor = visible_count - 1;
+        }
+        self.filtered_items = None;
+    }
 }
 
 #[cfg(test)]

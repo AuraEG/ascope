@@ -11,22 +11,13 @@
 
 use std::path::Path;
 
-use once_cell::sync::Lazy;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
-use syntect::{
-    easy::HighlightLines,
-    highlighting::{Style as SyntectStyle, ThemeSet},
-    parsing::SyntaxSet,
-};
 
 use crate::app::AppState;
 use crate::fs::walker::EntryType;
-
-static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines);
-static THEME_SET: Lazy<ThemeSet> = Lazy::new(ThemeSet::load_defaults);
 
 // --------------------------------------------------------------------------
 // [SECTION] Dashboard Renderer
@@ -625,116 +616,234 @@ fn render_file_preview(f: &mut Frame, state: &AppState, area: Rect) {
             .title(format!(" Preview: {title} "))
             .borders(Borders::ALL);
 
-        let lines = state.preview_lines().to_vec();
-        let preview = Paragraph::new(Text::from(lines))
-            .block(block)
-            .wrap(Wrap { trim: false });
-        f.render_widget(preview, area);
-    }
-}
+        let inner_area = block.inner(area);
+        f.render_widget(block, area);
 
-pub fn build_preview_lines(path: &Path, query: &str) -> Vec<Line<'static>> {
-    match load_preview_source(path, query) {
-        Ok((source, start_line)) => highlight_preview_source(path, &source, query, start_line),
-        Err(error) => {
-            if error.kind() == std::io::ErrorKind::InvalidData {
-                vec![Line::from("[Binary File - Preview Not Available]")]
-            } else {
-                vec![Line::from(format!("[x] Preview error: {error}"))]
+        let p_type = state.detect_preview_type(&entry.path);
+        if p_type == crate::app::PreviewType::Image {
+            let mut rendered_high_res = false;
+            if let Ok(mut guard) = state.last_rendered_image.lock() {
+                if let Some(ref mut cache) = *guard {
+                    rendered_high_res = true;
+                    // Skip cells to prevent Ratatui from rendering/clearing
+                    let buf = f.buffer_mut();
+                    for y in inner_area.top()..inner_area.bottom() {
+                        for x in inner_area.left()..inner_area.right() {
+                            buf.get_mut(x, y).set_skip(true);
+                        }
+                    }
+
+                    if cache.area != inner_area {
+                        use std::io::Write;
+                        let mut out = std::io::stdout();
+
+                        let _ = crossterm::queue!(out, crossterm::cursor::SavePosition);
+
+                        // Clear the terminal screen cells inside inner_area to erase old text
+                        for y in inner_area.top()..inner_area.bottom() {
+                            let _ =
+                                crossterm::queue!(out, crossterm::cursor::MoveTo(inner_area.x, y));
+                            let _ = out.write_all(" ".repeat(inner_area.width as usize).as_bytes());
+                        }
+
+                        // Move cursor back and print sequence
+                        let _ = crossterm::queue!(
+                            out,
+                            crossterm::cursor::MoveTo(inner_area.x, inner_area.y)
+                        );
+                        let _ = out.write_all(cache.sequence.as_bytes());
+
+                        let _ = crossterm::queue!(out, crossterm::cursor::RestorePosition);
+                        let _ = out.flush();
+
+                        cache.area = inner_area;
+                    }
+                }
             }
+
+            if !rendered_high_res {
+                let lines = state.preview_lines().to_vec();
+                let preview = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+                f.render_widget(preview, inner_area);
+            }
+        } else {
+            let lines = state.preview_lines().to_vec();
+            let preview = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+            f.render_widget(preview, inner_area);
         }
     }
 }
 
-fn load_preview_source(path: &Path, query: &str) -> std::io::Result<(String, usize)> {
+pub fn is_using_bat_previewer() -> bool {
+    true
+}
+
+fn get_match_line_and_total(path: &Path, query: &str) -> std::io::Result<(usize, usize)> {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
     let file = File::open(path)?;
     let reader = BufReader::new(file);
-    let mut lines = Vec::new();
+    let mut total_lines = 0;
+    let mut match_line = None;
+    let q_lower = query.to_lowercase();
 
-    for line in reader.lines() {
-        lines.push(line?);
-    }
-
-    let mut match_line = 0;
-    if !query.is_empty() {
-        let q_lower = query.to_lowercase();
-        for (i, line) in lines.iter().enumerate() {
-            if line.to_lowercase().contains(&q_lower) {
-                match_line = i;
-                break;
-            }
+    for line_res in reader.lines() {
+        let line = line_res?;
+        if match_line.is_none() && !q_lower.is_empty() && line.to_lowercase().contains(&q_lower) {
+            match_line = Some(total_lines);
         }
+        total_lines += 1;
     }
 
-    let start = match_line.saturating_sub(15);
-    let end = (start + 100).min(lines.len());
-    let start = end.saturating_sub(100).min(start);
-
-    let mut content = String::new();
-    for line in &lines[start..end] {
-        content.push_str(line);
-        content.push('\n');
-    }
-    Ok((content, start))
+    Ok((match_line.unwrap_or(0), total_lines))
 }
 
-fn highlight_preview_source(
-    path: &Path,
-    source: &str,
-    query: &str,
-    start_line: usize,
-) -> Vec<Line<'static>> {
-    let syntax = SYNTAX_SET
-        .find_syntax_for_file(path)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
-    let theme = THEME_SET
-        .themes
-        .get("base16-ocean.dark")
-        .unwrap_or_else(|| THEME_SET.themes.values().next().expect("default theme"));
-    let mut highlighter = HighlightLines::new(syntax, theme);
-    let mut lines = Vec::new();
+fn is_binary_file(path: &Path) -> bool {
+    use std::io::Read;
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut buf = [0; 1024];
+    let n = match file.read(&mut buf) {
+        Ok(bytes_read) => bytes_read,
+        Err(_) => return false,
+    };
+    if n == 0 {
+        return false;
+    }
+    let slice = &buf[..n];
+    if slice.contains(&0) {
+        return true;
+    }
+    let mut control_count = 0;
+    for &b in slice {
+        if b < 32 && b != 9 && b != 10 && b != 13 {
+            control_count += 1;
+        }
+    }
+    if control_count * 100 / n > 5 {
+        return true;
+    }
+    false
+}
 
-    for (idx, line) in source.split_inclusive('\n').enumerate() {
-        let line_num = start_line + 1 + idx;
-        let clean_line = line.trim_end_matches(&['\r', '\n'][..]);
-        let sanitized = sanitize_line(clean_line);
+pub fn build_preview_lines(path: &Path, query: &str) -> Vec<Line<'static>> {
+    if is_binary_file(path) {
+        return vec![Line::from("[Binary File - Preview Not Available]")];
+    }
+    use ansi_to_tui::IntoText as _;
+    use bat::assets::HighlightingAssets;
+    use bat::config::{Config, VisibleLines};
+    use bat::controller::Controller;
+    use bat::input::Input;
+    use bat::line_range::{HighlightedLineRanges, LineRange, LineRanges};
+    use bat::style::{StyleComponent, StyleComponents};
 
-        let mut spans = vec![Span::styled(
-            format!("{:4} │ ", line_num),
-            Style::default().fg(Color::DarkGray),
-        )];
+    let (match_line, total_lines) = match get_match_line_and_total(path, query) {
+        Ok(x) => x,
+        Err(error) => {
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                return vec![Line::from("[Binary File - Preview Not Available]")];
+            } else {
+                return vec![Line::from(format!("[x] Preview error: {error}"))];
+            }
+        }
+    };
 
-        match highlighter.highlight_line(&sanitized, &SYNTAX_SET) {
-            Ok(ranges) => {
-                for (style, text) in ranges {
-                    spans.extend(highlight_spans_with_query(
-                        text,
-                        to_ratatui_style(style),
+    let start = match_line.saturating_sub(15);
+    let end = (start + 100).min(total_lines);
+    let start = end.saturating_sub(100).min(start);
+
+    let start_line = start + 1;
+    let end_line = end.max(1);
+
+    let assets = HighlightingAssets::from_binary();
+    let highlighted_lines = if !query.is_empty() {
+        HighlightedLineRanges(LineRanges::from(vec![LineRange::new(
+            match_line + 1,
+            match_line + 1,
+        )]))
+    } else {
+        HighlightedLineRanges::default()
+    };
+    let mut config = Config {
+        colored_output: true,
+        true_color: true,
+        theme: "base16".to_string(),
+        visible_lines: VisibleLines::Ranges(LineRanges::from(vec![LineRange::new(
+            start_line, end_line,
+        )])),
+        highlighted_lines,
+        style_components: StyleComponents::new(&[StyleComponent::LineNumbers]),
+        ..Default::default()
+    };
+
+    let mut mapping = bat::SyntaxMapping::builtin();
+    let custom_mappings = [
+        ("*.mjs", "JavaScript (Babel)"),
+        ("*.cjs", "JavaScript (Babel)"),
+        ("*.jsx", "JavaScript (Babel)"),
+        ("*.mts", "TypeScript"),
+        ("*.cts", "TypeScript"),
+        ("*.tsx", "TypeScriptReact"),
+        ("*.tfvars", "Terraform"),
+        ("*.kts", "Kotlin"),
+        ("*.pyc", "Python"),
+        ("*.pyd", "Python"),
+        ("*.pyo", "Python"),
+        ("*.cc", "C++"),
+        ("*.cxx", "C++"),
+        ("*.hpp", "C++"),
+        ("*.zsh", "Bourne Again Shell (bash)"),
+        ("*.fish", "Bourne Again Shell (bash)"),
+        ("*.db", "SQL"),
+        ("*.sqlite", "SQL"),
+        ("*.gql", "GraphQL"),
+        ("*.markdown", "Markdown"),
+        ("Gemfile", "Ruby"),
+        ("Rakefile", "Ruby"),
+        ("gemfile", "Ruby"),
+        ("rakefile", "Ruby"),
+        ("Dockerfile", "Dockerfile"),
+        ("dockerfile", "Dockerfile"),
+        ("LICENSE", "Plain Text"),
+        ("license", "Plain Text"),
+    ];
+
+    use bat::MappingTarget;
+    for &(pattern, syntax) in &custom_mappings {
+        mapping.insert(pattern, MappingTarget::MapTo(syntax)).ok();
+    }
+    config.syntax_mapping = mapping;
+
+    let controller = Controller::new(&config, &assets);
+    let mut output_string = String::new();
+    let input = Input::ordinary_file(path);
+
+    if controller
+        .run(vec![input], Some(&mut output_string))
+        .is_ok()
+    {
+        if let Ok(text) = output_string.as_bytes().into_text() {
+            let mut highlighted_lines = Vec::new();
+            for line in text.lines {
+                let mut highlighted_spans = Vec::new();
+                for span in line.spans {
+                    highlighted_spans.extend(highlight_spans_with_query(
+                        &span.content,
+                        span.style,
                         query,
                     ));
                 }
+                highlighted_lines.push(Line::from(highlighted_spans));
             }
-            Err(_) => {
-                spans.extend(highlight_spans_with_query(
-                    &sanitized,
-                    Style::default(),
-                    query,
-                ));
-            }
+            return highlighted_lines;
         }
-        lines.push(Line::from(spans));
     }
 
-    if lines.is_empty() {
-        lines.push(Line::from("[i] Empty file"));
-    }
-
-    lines
+    vec![Line::from("[Error generating preview]")]
 }
 
 fn highlight_spans_with_query(text: &str, style: Style, query: &str) -> Vec<Span<'static>> {
@@ -778,20 +887,6 @@ fn highlight_spans_with_query(text: &str, style: Style, query: &str) -> Vec<Span
     }
 
     spans
-}
-
-fn to_ratatui_style(style: SyntectStyle) -> Style {
-    Style::default()
-        .fg(Color::Rgb(
-            style.foreground.r,
-            style.foreground.g,
-            style.foreground.b,
-        ))
-        .bg(Color::Rgb(
-            style.background.r,
-            style.background.g,
-            style.background.b,
-        ))
 }
 
 /// Replaces tab characters with 4 spaces and strips or replaces other control
@@ -1544,39 +1639,6 @@ fn render_help_modal(f: &mut Frame, state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs::File;
-    use std::io::Write;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_load_preview_source_reads_file_contents() {
-        let dir = tempdir().unwrap();
-        let file_path = dir.path().join("sample.rs");
-        let mut file = File::create(&file_path).unwrap();
-        file.write_all(b"fn main() {}\n").unwrap();
-
-        let (preview, start_line) = load_preview_source(&file_path, "").unwrap();
-        assert!(preview.contains("fn main() {}"));
-        assert_eq!(start_line, 0);
-    }
-
-    #[test]
-    fn test_syntax_set_lazy_init() {
-        let ext = SYNTAX_SET.find_syntax_by_extension("rs");
-        assert!(ext.is_some());
-
-        let theme = THEME_SET.themes.get("base16-ocean.dark");
-        assert!(theme.is_some());
-    }
-
-    #[test]
-    fn test_sanitize_line_removes_control_chars_and_tabs() {
-        let line_with_tabs = "hello\tworld";
-        assert_eq!(sanitize_line(line_with_tabs), "hello    world");
-
-        let line_with_ctrl = "hello\rworld\x1b[31m";
-        assert_eq!(sanitize_line(line_with_ctrl), "hello world [31m");
-    }
 
     #[test]
     fn test_icon_lookup() {
