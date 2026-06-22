@@ -13,13 +13,18 @@ fn test_bat_highlights_rust_code() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("main.rs");
     let mut file = File::create(&file_path).unwrap();
-    file.write_all(b"fn main() {\n    println!(\"hello\");\n}\n").unwrap();
+    file.write_all(b"fn main() {\n    println!(\"hello\");\n}\n")
+        .unwrap();
 
     let lines = build_preview_lines(&file_path, "");
     assert!(!lines.is_empty());
-    
+
     // The preview should contain "fn main()" text
-    let text = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
+    let text = lines
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(text.contains("fn main()"));
 }
 
@@ -28,11 +33,16 @@ fn test_bat_highlights_custom_extensions() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("index.tsx");
     let mut file = File::create(&file_path).unwrap();
-    file.write_all(b"const App = () => <div>Hello</div>;\nexport default App;\n").unwrap();
+    file.write_all(b"const App = () => <div>Hello</div>;\nexport default App;\n")
+        .unwrap();
 
     let lines = build_preview_lines(&file_path, "");
     assert!(!lines.is_empty());
-    let text = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
+    let text = lines
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(text.contains("const App"));
 }
 
@@ -41,11 +51,16 @@ fn test_bat_highlights_markdown() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("test.md");
     let mut file = File::create(&file_path).unwrap();
-    file.write_all(b"# Header\n**bold text**\nnormal text\n").unwrap();
+    file.write_all(b"# Header\n**bold text**\nnormal text\n")
+        .unwrap();
 
     let lines = build_preview_lines(&file_path, "");
     assert!(!lines.is_empty());
-    let text = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
+    let text = lines
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(text.contains("Header"));
 }
 
@@ -62,6 +77,3 @@ fn test_bat_previewer_handles_binary_files() {
     let text = lines[0].to_string();
     assert!(text.contains("Binary File"));
 }
-
-
-

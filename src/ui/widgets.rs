@@ -19,8 +19,6 @@ use ratatui::{
 use crate::app::AppState;
 use crate::fs::walker::EntryType;
 
-
-
 // --------------------------------------------------------------------------
 // [SECTION] Dashboard Renderer
 // --------------------------------------------------------------------------
@@ -618,11 +616,61 @@ fn render_file_preview(f: &mut Frame, state: &AppState, area: Rect) {
             .title(format!(" Preview: {title} "))
             .borders(Borders::ALL);
 
-        let lines = state.preview_lines().to_vec();
-        let preview = Paragraph::new(Text::from(lines))
-            .block(block)
-            .wrap(Wrap { trim: false });
-        f.render_widget(preview, area);
+        let inner_area = block.inner(area);
+        f.render_widget(block, area);
+
+        let p_type = state.detect_preview_type(&entry.path);
+        if p_type == crate::app::PreviewType::Image {
+            let mut rendered_high_res = false;
+            if let Ok(mut guard) = state.last_rendered_image.lock() {
+                if let Some(ref mut cache) = *guard {
+                    rendered_high_res = true;
+                    // Skip cells to prevent Ratatui from rendering/clearing
+                    let buf = f.buffer_mut();
+                    for y in inner_area.top()..inner_area.bottom() {
+                        for x in inner_area.left()..inner_area.right() {
+                            buf.get_mut(x, y).set_skip(true);
+                        }
+                    }
+
+                    if cache.area != inner_area {
+                        use std::io::Write;
+                        let mut out = std::io::stdout();
+
+                        let _ = crossterm::queue!(out, crossterm::cursor::SavePosition);
+
+                        // Clear the terminal screen cells inside inner_area to erase old text
+                        for y in inner_area.top()..inner_area.bottom() {
+                            let _ =
+                                crossterm::queue!(out, crossterm::cursor::MoveTo(inner_area.x, y));
+                            let _ = out.write_all(" ".repeat(inner_area.width as usize).as_bytes());
+                        }
+
+                        // Move cursor back and print sequence
+                        let _ = crossterm::queue!(
+                            out,
+                            crossterm::cursor::MoveTo(inner_area.x, inner_area.y)
+                        );
+                        let _ = out.write_all(cache.sequence.as_bytes());
+
+                        let _ = crossterm::queue!(out, crossterm::cursor::RestorePosition);
+                        let _ = out.flush();
+
+                        cache.area = inner_area;
+                    }
+                }
+            }
+
+            if !rendered_high_res {
+                let lines = state.preview_lines().to_vec();
+                let preview = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+                f.render_widget(preview, inner_area);
+            }
+        } else {
+            let lines = state.preview_lines().to_vec();
+            let preview = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+            f.render_widget(preview, inner_area);
+        }
     }
 }
 
@@ -690,7 +738,7 @@ pub fn build_preview_lines(path: &Path, query: &str) -> Vec<Line<'static>> {
     use bat::config::{Config, VisibleLines};
     use bat::controller::Controller;
     use bat::input::Input;
-    use bat::line_range::{LineRange, LineRanges, HighlightedLineRanges};
+    use bat::line_range::{HighlightedLineRanges, LineRange, LineRanges};
     use bat::style::{StyleComponent, StyleComponents};
 
     let (match_line, total_lines) = match get_match_line_and_total(path, query) {
@@ -713,7 +761,10 @@ pub fn build_preview_lines(path: &Path, query: &str) -> Vec<Line<'static>> {
 
     let assets = HighlightingAssets::from_binary();
     let highlighted_lines = if !query.is_empty() {
-        HighlightedLineRanges(LineRanges::from(vec![LineRange::new(match_line + 1, match_line + 1)]))
+        HighlightedLineRanges(LineRanges::from(vec![LineRange::new(
+            match_line + 1,
+            match_line + 1,
+        )]))
     } else {
         HighlightedLineRanges::default()
     };
@@ -721,7 +772,9 @@ pub fn build_preview_lines(path: &Path, query: &str) -> Vec<Line<'static>> {
         colored_output: true,
         true_color: true,
         theme: "base16".to_string(),
-        visible_lines: VisibleLines::Ranges(LineRanges::from(vec![LineRange::new(start_line, end_line)])),
+        visible_lines: VisibleLines::Ranges(LineRanges::from(vec![LineRange::new(
+            start_line, end_line,
+        )])),
         highlighted_lines,
         style_components: StyleComponents::new(&[StyleComponent::LineNumbers]),
         ..Default::default()
@@ -769,7 +822,10 @@ pub fn build_preview_lines(path: &Path, query: &str) -> Vec<Line<'static>> {
     let mut output_string = String::new();
     let input = Input::ordinary_file(path);
 
-    if controller.run(vec![input], Some(&mut output_string)).is_ok() {
+    if controller
+        .run(vec![input], Some(&mut output_string))
+        .is_ok()
+    {
         if let Ok(text) = output_string.as_bytes().into_text() {
             let mut highlighted_lines = Vec::new();
             for line in text.lines {
@@ -1583,8 +1639,6 @@ fn render_help_modal(f: &mut Frame, state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-
 
     #[test]
     fn test_icon_lookup() {
