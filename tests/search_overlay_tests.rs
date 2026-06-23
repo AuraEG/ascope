@@ -82,6 +82,72 @@ fn test_search_overlay_live_grep() {
     }
 
     assert_eq!(state.search_overlay_results.len(), 1);
-    assert!(state.search_overlay_results[0].text.contains("rust is extremely fast"));
+    assert!(state.search_overlay_results[0]
+        .text
+        .contains("rust is extremely fast"));
 }
 
+#[test]
+fn test_search_overlay_cursor_movement_and_editing() {
+    let dir = tempdir().unwrap();
+    let mut state = AppState::new(dir.path().to_path_buf());
+
+    // Initially cursor index is 0
+    assert_eq!(state.search_overlay_cursor_index, 0);
+
+    // Simulate typing "test" at cursor index
+    for c in "test".chars() {
+        let char_idx = state.search_overlay_cursor_index;
+        let byte_idx = state
+            .search_overlay_input
+            .char_indices()
+            .nth(char_idx)
+            .map(|(i, _)| i)
+            .unwrap_or(state.search_overlay_input.len());
+        state.search_overlay_input.insert(byte_idx, c);
+        state.search_overlay_cursor_index += 1;
+    }
+    assert_eq!(state.search_overlay_input, "test");
+    assert_eq!(state.search_overlay_cursor_index, 4);
+
+    // Move cursor left twice
+    state.search_overlay_cursor_index -= 1;
+    state.search_overlay_cursor_index -= 1;
+    assert_eq!(state.search_overlay_cursor_index, 2);
+
+    // Insert 'a' at cursor (which is between "te" and "st")
+    {
+        let char_idx = state.search_overlay_cursor_index;
+        let byte_idx = state
+            .search_overlay_input
+            .char_indices()
+            .nth(char_idx)
+            .map(|(i, _)| i)
+            .unwrap_or(state.search_overlay_input.len());
+        state.search_overlay_input.insert(byte_idx, 'a');
+        state.search_overlay_cursor_index += 1;
+    }
+    assert_eq!(state.search_overlay_input, "teast");
+    assert_eq!(state.search_overlay_cursor_index, 3);
+
+    // Backspace at index 3 (removes 'a')
+    {
+        let char_idx = state.search_overlay_cursor_index - 1;
+        if let Some((byte_idx, _)) = state.search_overlay_input.char_indices().nth(char_idx) {
+            state.search_overlay_input.remove(byte_idx);
+            state.search_overlay_cursor_index -= 1;
+        }
+    }
+    assert_eq!(state.search_overlay_input, "test");
+    assert_eq!(state.search_overlay_cursor_index, 2);
+
+    // Delete key at index 2 (removes 's' from "st")
+    {
+        let char_idx = state.search_overlay_cursor_index;
+        if let Some((byte_idx, _)) = state.search_overlay_input.char_indices().nth(char_idx) {
+            state.search_overlay_input.remove(byte_idx);
+        }
+    }
+    assert_eq!(state.search_overlay_input, "tet");
+    assert_eq!(state.search_overlay_cursor_index, 2);
+}

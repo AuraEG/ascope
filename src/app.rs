@@ -157,6 +157,8 @@ pub struct AppState {
     pub search_overlay_input: String,
     pub search_overlay_results: Vec<SearchMatch>,
     pub search_overlay_selected_index: usize,
+    pub search_overlay_cursor_index: usize,
+    pub search_overlay_focused: bool,
     pub rg_query_tx: std::sync::mpsc::Sender<crate::search::ripgrep::RgSearchQuery>,
     pub rg_match_rx: std::sync::mpsc::Receiver<crate::search::ripgrep::RgMessage>,
 }
@@ -415,6 +417,8 @@ impl AppState {
             search_overlay_input: String::new(),
             search_overlay_results: Vec::new(),
             search_overlay_selected_index: 0,
+            search_overlay_cursor_index: 0,
+            search_overlay_focused: true,
             rg_query_tx,
             rg_match_rx,
         }
@@ -533,7 +537,9 @@ impl AppState {
 
     pub fn poll_search_updates(&mut self) {
         while let Ok(msg) = self.rg_match_rx.try_recv() {
-            if self.modal_mode == ModalMode::SearchOverlay && self.search_overlay_mode == SearchOverlayMode::LiveGrep {
+            if self.modal_mode == ModalMode::SearchOverlay
+                && self.search_overlay_mode == SearchOverlayMode::LiveGrep
+            {
                 match msg {
                     crate::search::ripgrep::RgMessage::Match(m) => {
                         if self.search_overlay_results.len() < 200 {
@@ -563,7 +569,10 @@ impl AppState {
         self.poll_search_updates();
 
         let (selected, target_line) = if self.modal_mode == ModalMode::SearchOverlay {
-            if let Some(res) = self.search_overlay_results.get(self.search_overlay_selected_index) {
+            if let Some(res) = self
+                .search_overlay_results
+                .get(self.search_overlay_selected_index)
+            {
                 (Some(res.path.clone()), res.line_number)
             } else {
                 (None, None)
@@ -579,7 +588,10 @@ impl AppState {
         };
 
         if let Some((cached_path, cached_query, cached_target_line, _)) = &self.preview_cache {
-            if Some(cached_path) == selected.as_ref() && cached_query == &query && *cached_target_line == target_line {
+            if Some(cached_path) == selected.as_ref()
+                && cached_query == &query
+                && *cached_target_line == target_line
+            {
                 return;
             }
         }
@@ -609,7 +621,8 @@ impl AppState {
                     return;
                 }
 
-                let lines = crate::ui::widgets::build_preview_lines_focused(&path, &query, target_line);
+                let lines =
+                    crate::ui::widgets::build_preview_lines_focused(&path, &query, target_line);
                 self.preview_cache = Some((path, query, target_line, lines));
                 *self.last_rendered_image.lock().unwrap() = None;
                 return;
@@ -1367,13 +1380,19 @@ impl AppState {
     pub fn update_search_overlay_results(&mut self) {
         if self.search_overlay_input.is_empty() {
             // Return all files by default if search query is empty
-            self.search_overlay_results = self.all_entries
+            self.search_overlay_results = self
+                .all_entries
                 .iter()
                 .filter(|e| e.entry_type == EntryType::File)
                 .map(|e| SearchMatch {
                     path: e.path.clone(),
                     line_number: None,
-                    text: e.path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                    text: e
+                        .path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
                 })
                 .collect();
             self.search_overlay_selected_index = 0;
@@ -1388,7 +1407,11 @@ impl AppState {
                 };
 
                 let mut matcher = Matcher::new(Config::DEFAULT);
-                let pattern = Pattern::parse(&self.search_overlay_input, CaseMatching::Smart, Normalization::Smart);
+                let pattern = Pattern::parse(
+                    &self.search_overlay_input,
+                    CaseMatching::Smart,
+                    Normalization::Smart,
+                );
 
                 let mut results = Vec::new();
                 for item in &self.all_entries {
@@ -1407,7 +1430,12 @@ impl AppState {
                     .map(|(e, _)| SearchMatch {
                         path: e.path.clone(),
                         line_number: None,
-                        text: e.path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                        text: e
+                            .path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
                     })
                     .collect();
                 self.search_overlay_selected_index = 0;
@@ -1415,10 +1443,12 @@ impl AppState {
             SearchOverlayMode::LiveGrep => {
                 self.search_overlay_results.clear();
                 self.search_overlay_selected_index = 0;
-                let _ = self.rg_query_tx.send(crate::search::ripgrep::RgSearchQuery {
-                    query: self.search_overlay_input.clone(),
-                    dir: self.current_path.clone(),
-                });
+                let _ = self
+                    .rg_query_tx
+                    .send(crate::search::ripgrep::RgSearchQuery {
+                        query: self.search_overlay_input.clone(),
+                        dir: self.current_path.clone(),
+                    });
             }
         }
     }

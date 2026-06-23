@@ -62,7 +62,7 @@ pub fn spawn_rg_worker(query_rx: Receiver<RgSearchQuery>, match_tx: Sender<RgMes
             Ok(mut child) => {
                 let stdout = child.stdout.take().expect("Failed to open stdout");
                 let match_tx_clone = match_tx.clone();
-                
+
                 // Track child so we can cancel it if needed
                 current_child = Some(child);
 
@@ -75,17 +75,25 @@ pub fn spawn_rg_worker(query_rx: Receiver<RgSearchQuery>, match_tx: Sender<RgMes
                         if let Some(msg_type) = val.get("type").and_then(|t| t.as_str()) {
                             match msg_type {
                                 "begin" => {
-                                    if let Some(path_val) = val.get("data").and_then(|d| d.get("path")).and_then(|p| p.get("text")).and_then(|t| t.as_str()) {
+                                    if let Some(path_val) = val
+                                        .get("data")
+                                        .and_then(|d| d.get("path"))
+                                        .and_then(|p| p.get("text"))
+                                        .and_then(|t| t.as_str())
+                                    {
                                         current_file = Some(PathBuf::from(path_val));
                                     }
                                 }
                                 "match" => {
-                                    let line_number = val.get("data")
+                                    let line_number = val
+                                        .get("data")
                                         .and_then(|d| d.get("line_number"))
                                         .and_then(|l| l.as_u64())
-                                        .unwrap_or(0) as usize;
+                                        .unwrap_or(0)
+                                        as usize;
 
-                                    let text = val.get("data")
+                                    let text = val
+                                        .get("data")
                                         .and_then(|d| d.get("lines"))
                                         .and_then(|l| l.get("text"))
                                         .and_then(|t| t.as_str())

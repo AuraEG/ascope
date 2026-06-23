@@ -1,15 +1,16 @@
 use ascope::search::ripgrep::{spawn_rg_worker, RgMessage, RgSearchQuery};
-use std::sync::mpsc;
-use tempfile::tempdir;
 use std::fs::File;
 use std::io::Write;
+use std::sync::mpsc;
+use tempfile::tempdir;
 
 #[test]
 fn test_async_ripgrep_search() {
     let dir = tempdir().unwrap();
     let file1 = dir.path().join("test1.txt");
     let mut f1 = File::create(&file1).unwrap();
-    f1.write_all(b"hello world\nthis is a test\nrust is awesome\n").unwrap();
+    f1.write_all(b"hello world\nthis is a test\nrust is awesome\n")
+        .unwrap();
 
     let (query_tx, query_rx) = mpsc::channel();
     let (match_tx, match_rx) = mpsc::channel();
@@ -20,10 +21,12 @@ fn test_async_ripgrep_search() {
     });
 
     // Send search query
-    query_tx.send(RgSearchQuery {
-        query: "awesome".to_string(),
-        dir: dir.path().to_path_buf(),
-    }).unwrap();
+    query_tx
+        .send(RgSearchQuery {
+            query: "awesome".to_string(),
+            dir: dir.path().to_path_buf(),
+        })
+        .unwrap();
 
     // Wait and receive matches
     let mut matches = Vec::new();

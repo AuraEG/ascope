@@ -38,3 +38,73 @@ fn test_plugin_engine_loads_and_evaluates() {
     let res = engine.trigger_event("key", "Ctrl-S".to_string()).unwrap();
     assert_eq!(res, vec!["handled: Ctrl-S".to_string()]);
 }
+
+#[test]
+fn test_plugin_engine_search_api() {
+    let dir = tempdir().unwrap();
+    let plugin_dir = dir.path().join("my-plugin");
+    fs::create_dir_all(&plugin_dir).unwrap();
+
+    {
+        let mut toml_file = File::create(plugin_dir.join("plugin.toml")).unwrap();
+        write!(
+            toml_file,
+            r#"
+            name = "my-plugin"
+            version = "0.1.0"
+            author = "Developer"
+            main = "init.lua"
+        "#
+        )
+        .unwrap();
+    }
+
+    // Create a file to search
+    {
+        let search_target = dir.path().join("test_search.txt");
+        let mut st = File::create(&search_target).unwrap();
+        writeln!(st, "this is a special query string match").unwrap();
+    }
+
+    {
+        let mut lua_file = File::create(plugin_dir.join("init.lua")).unwrap();
+        write!(
+            lua_file,
+            r#"
+            ascope.on("test_search", function(query)
+                local results = ascope.search(query)
+                if #results > 0 then
+                    return "found: " .. results[1].text
+                else
+                    return "not found"
+                end
+            end)
+        "#
+        )
+        .unwrap();
+    }
+
+    // We initialize the plugin engine with dir.path() / .config/ascope/plugins
+    let config_dir = dir.path().join(".config/ascope/plugins");
+    fs::create_dir_all(&config_dir).unwrap();
+    // Copy the plugin to the plugins directory
+    let dest_plugin = config_dir.join("my-plugin");
+    fs::create_dir_all(&dest_plugin).unwrap();
+    fs::copy(
+        plugin_dir.join("plugin.toml"),
+        dest_plugin.join("plugin.toml"),
+    )
+    .unwrap();
+    fs::copy(plugin_dir.join("init.lua"), dest_plugin.join("init.lua")).unwrap();
+
+    let mut engine = PluginEngine::new(config_dir).unwrap();
+    engine.load_plugins().unwrap();
+
+    let res = engine
+        .trigger_event("test_search", "special query".to_string())
+        .unwrap();
+    assert_eq!(
+        res,
+        vec!["found: this is a special query string match\n".to_string()]
+    );
+}
