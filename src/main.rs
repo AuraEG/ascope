@@ -118,6 +118,7 @@ fn event_loop(
             // to make sure background workers can still deliver results.
             state.poll_preview_updates();
         }
+        state.poll_search_updates();
         terminal.draw(|f| ui::widgets::render_dashboard(f, &state))?;
 
         match events.next()? {
