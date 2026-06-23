@@ -14,6 +14,96 @@ impl PluginEngine {
 
         // Inject global api table
         let ascope_api = lua.create_table()?;
+        
+        let search_dir_clone = plugin_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+        let search_fn = lua.create_function(move |lua, query: String| {
+            if query.is_empty() {
+                return lua.create_table();
+            }
+
+            // Run rg synchronously
+            let child_res = std::process::Command::new("rg")
+                .args([
+                    "--json",
+                    "-S", // Smart case matching
+                    "--line-number",
+                    "--column",
+                    "--no-heading",
+                    "--color=never",
+                    "--glob=!node_modules",
+                    "--glob=!target",
+                    "--glob=!.git",
+                    &query,
+                    &search_dir_clone.to_string_lossy(),
+                ])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+
+            let results_table = lua.create_table()?;
+
+            if let Ok(mut child) = child_res {
+                if let Some(stdout) = child.stdout.take() {
+                    use std::io::{BufRead, BufReader};
+                    let reader = BufReader::new(stdout);
+                    let mut current_file: Option<String> = None;
+                    let mut idx = 1;
+
+                    for line in reader.lines().map_while(Result::ok) {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
+                            if let Some(msg_type) = val.get("type").and_then(|t| t.as_str()) {
+                                match msg_type {
+                                    "begin" => {
+                                        if let Some(path_val) = val.get("data").and_then(|d| d.get("path")).and_then(|p| p.get("text")).and_then(|t| t.as_str()) {
+                                            current_file = Some(path_val.to_string());
+                                        }
+                                    }
+                                    "match" => {
+                                        let line_number = val.get("data")
+                                            .and_then(|d| d.get("line_number"))
+                                            .and_then(|l| l.as_u64())
+                                            .unwrap_or(0) as usize;
+
+                                        let text = val.get("data")
+                                            .and_then(|d| d.get("lines"))
+                                            .and_then(|l| l.get("text"))
+                                            .and_then(|t| t.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+
+                                        if let Some(ref path) = current_file {
+                                            let match_tbl = lua.create_table()?;
+                                            match_tbl.set("path", path.clone())?;
+                                            match_tbl.set("line_number", line_number)?;
+                                            match_tbl.set("text", text)?;
+                                            results_table.set(idx, match_tbl)?;
+                                            idx += 1;
+                                            
+                                            if idx > 200 {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+
+            Ok(results_table)
+        })?;
+        ascope_api.set("search", search_fn)?;
+
         lua.globals().set("ascope", ascope_api)?;
 
         Ok(Self { lua, plugin_dir })

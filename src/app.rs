@@ -157,6 +157,8 @@ pub struct AppState {
     pub search_overlay_input: String,
     pub search_overlay_results: Vec<SearchMatch>,
     pub search_overlay_selected_index: usize,
+    pub search_overlay_cursor_index: usize,
+    pub search_overlay_focused: bool,
     pub rg_query_tx: std::sync::mpsc::Sender<crate::search::ripgrep::RgSearchQuery>,
     pub rg_match_rx: std::sync::mpsc::Receiver<crate::search::ripgrep::RgMessage>,
 }
@@ -415,6 +417,8 @@ impl AppState {
             search_overlay_input: String::new(),
             search_overlay_results: Vec::new(),
             search_overlay_selected_index: 0,
+            search_overlay_cursor_index: 0,
+            search_overlay_focused: true,
             rg_query_tx,
             rg_match_rx,
         }

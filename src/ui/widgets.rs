@@ -13,7 +13,7 @@ use std::path::Path;
 
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
 
 use crate::app::AppState;
@@ -1520,6 +1520,16 @@ static HELP_ITEMS: &[HelpItem] = &[
         context: "Search",
     },
     HelpItem {
+        key: "Alt+f",
+        desc: "Open Search Overlay (Fuzzy File Finder)",
+        context: "Search",
+    },
+    HelpItem {
+        key: "Alt+g",
+        desc: "Open Search Overlay (Live Grep Content)",
+        context: "Search",
+    },
+    HelpItem {
         key: "Esc",
         desc: "Close current overlay / modal",
         context: "Modals",
@@ -1535,6 +1545,10 @@ static HELP_ITEMS: &[HelpItem] = &[
         context: "Modals",
     },
 ];
+
+pub fn help_items_len() -> usize {
+    HELP_ITEMS.len()
+}
 
 fn render_help_modal(f: &mut Frame, state: &AppState) {
     let area = centered_rect(80, 85, f.size());
@@ -1677,6 +1691,11 @@ fn render_search_modal(f: &mut Frame, state: &AppState, area: Rect) {
         Span::raw("close"),
     ]);
 
+    let border_color = match state.search_overlay_mode {
+        SearchOverlayMode::FuzzyFiles => Color::Rgb(240, 200, 50),     // elegant gold
+        SearchOverlayMode::LiveGrep => Color::Rgb(50, 150, 250),       // vibrant blue
+    };
+
     let block = Block::default()
         .title(Line::from(vec![
             Span::styled(" 󰍉 ", Style::default().fg(Color::Yellow).bold()),
@@ -1685,7 +1704,7 @@ fn render_search_modal(f: &mut Frame, state: &AppState, area: Rect) {
         .title_bottom(footer)
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(240, 200, 50))) // elegant gold border
+        .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(Color::Rgb(25, 25, 30)));
 
     let inner_area = block.inner(modal_area);
@@ -1712,16 +1731,43 @@ fn render_search_modal(f: &mut Frame, state: &AppState, area: Rect) {
         .style(Style::default().fg(Color::White));
     f.render_widget(input_para, chunks[0]);
 
+    // Show blinking cursor at input
+    if state.search_overlay_focused {
+        f.set_cursor(
+            chunks[0].x + 1 + state.search_overlay_cursor_index as u16,
+            chunks[0].y + 1,
+        );
+    }
+
     // 2. Draw results list
-    let list_items: Vec<ListItem> = state.search_overlay_results
+    let total_results = state.search_overlay_results.len();
+    let list_height = (chunks[1].height as usize).saturating_sub(1); // 1 row for top border
+
+    let start_idx = if total_results <= list_height {
+        0
+    } else {
+        let half = list_height / 2;
+        let cursor = state.search_overlay_selected_index;
+        if cursor < half {
+            0
+        } else if cursor >= total_results - half {
+            total_results - list_height
+        } else {
+            cursor - half
+        }
+    };
+
+    let end_idx = total_results.min(start_idx + list_height);
+    let window = &state.search_overlay_results[start_idx..end_idx];
+
+    let list_items: Vec<ListItem> = window
         .iter()
         .enumerate()
         .map(|(i, result)| {
-            let is_selected = i == state.search_overlay_selected_index;
-            let icon = match state.search_overlay_mode {
-                SearchOverlayMode::FuzzyFiles => "󰈔 ",
-                SearchOverlayMode::LiveGrep => "󱘗 ",
-            };
+            let actual_idx = start_idx + i;
+            let is_selected = actual_idx == state.search_overlay_selected_index;
+            let icon_str = get_icon(&result.path, &EntryType::File);
+            let icon_style = get_icon_style(&result.path, &EntryType::File);
 
             let text_style = if is_selected {
                 Style::default().fg(Color::Black).bg(Color::Cyan).bold()
@@ -1730,7 +1776,7 @@ fn render_search_modal(f: &mut Frame, state: &AppState, area: Rect) {
             };
 
             ListItem::new(Line::from(vec![
-                Span::styled(icon, Style::default().fg(Color::Gray)),
+                Span::styled(format!("{} ", icon_str), icon_style),
                 Span::styled(result.text.clone(), text_style),
             ]))
         })
@@ -1739,11 +1785,31 @@ fn render_search_modal(f: &mut Frame, state: &AppState, area: Rect) {
     let list_block = Block::default()
         .borders(Borders::TOP)
         .border_style(Style::default().fg(Color::DarkGray))
-        .title(format!(" Results ({}) ", state.search_overlay_results.len()));
+        .title(format!(" Results ({}) ", total_results));
 
     let list = List::new(list_items)
         .block(list_block);
     f.render_widget(list, chunks[1]);
+
+    // Draw scrollbar if there are more results than the list height
+    if total_results > list_height {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_symbol(Some("░"))
+            .thumb_symbol("█");
+
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(total_results)
+            .position(state.search_overlay_selected_index);
+
+        let scrollbar_area = chunks[1].inner(&Margin {
+            vertical: 1,
+            horizontal: 0,
+        });
+
+        f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+    }
 }
 
 // --------------------------------------------------------------------------
