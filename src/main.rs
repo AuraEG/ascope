@@ -118,6 +118,7 @@ fn event_loop(
             // to make sure background workers can still deliver results.
             state.poll_preview_updates();
         }
+        state.poll_search_updates();
         terminal.draw(|f| ui::widgets::render_dashboard(f, &state))?;
 
         match events.next()? {
@@ -136,11 +137,11 @@ fn event_loop(
                             state.show_help = false;
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            let count = 28;
+                            let count = crate::ui::widgets::help_items_len();
                             state.help_selected_index = (state.help_selected_index + 1) % count;
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
-                            let count = 28;
+                            let count = crate::ui::widgets::help_items_len();
                             state.help_selected_index =
                                 (state.help_selected_index + count - 1) % count;
                         }
@@ -164,7 +165,332 @@ fn event_loop(
                         _ => {}
                     }
                 } else if state.modal_mode != ascope::app::ModalMode::None {
-                    if state.modal_mode == ascope::app::ModalMode::DeleteConfirmation {
+                    if state.modal_mode == ascope::app::ModalMode::SearchOverlay {
+                        if state.search_overlay_focused {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    state.modal_mode = ascope::app::ModalMode::None;
+                                    state.search_overlay_input.clear();
+                                    state.search_overlay_results.clear();
+                                    state.search_overlay_cursor_index = 0;
+                                    state.search_overlay_focused = true;
+                                }
+                                KeyCode::Tab => {
+                                    if state.search_overlay_mode
+                                        == ascope::app::SearchOverlayMode::FuzzyFiles
+                                    {
+                                        state.search_overlay_mode =
+                                            ascope::app::SearchOverlayMode::LiveGrep;
+                                    } else {
+                                        state.search_overlay_mode =
+                                            ascope::app::SearchOverlayMode::FuzzyFiles;
+                                    }
+                                    state.update_search_overlay_results();
+                                }
+                                KeyCode::Up => {
+                                    state.search_overlay_focused = false;
+                                    let len = state.search_overlay_results.len();
+                                    if len > 0 {
+                                        state.search_overlay_selected_index =
+                                            (state.search_overlay_selected_index + len - 1) % len;
+                                    }
+                                }
+                                KeyCode::Down => {
+                                    state.search_overlay_focused = false;
+                                    let len = state.search_overlay_results.len();
+                                    if len > 0 {
+                                        state.search_overlay_selected_index =
+                                            (state.search_overlay_selected_index + 1) % len;
+                                    }
+                                }
+                                KeyCode::Char('p')
+                                    if key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                                {
+                                    state.search_overlay_focused = false;
+                                    let len = state.search_overlay_results.len();
+                                    if len > 0 {
+                                        state.search_overlay_selected_index =
+                                            (state.search_overlay_selected_index + len - 1) % len;
+                                    }
+                                }
+                                KeyCode::Char('n')
+                                    if key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                                {
+                                    state.search_overlay_focused = false;
+                                    let len = state.search_overlay_results.len();
+                                    if len > 0 {
+                                        state.search_overlay_selected_index =
+                                            (state.search_overlay_selected_index + 1) % len;
+                                    }
+                                }
+                                KeyCode::Char('k')
+                                    if key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                                {
+                                    state.search_overlay_focused = false;
+                                    let len = state.search_overlay_results.len();
+                                    if len > 0 {
+                                        state.search_overlay_selected_index =
+                                            (state.search_overlay_selected_index + len - 1) % len;
+                                    }
+                                }
+                                KeyCode::Char('j')
+                                    if key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                                {
+                                    state.search_overlay_focused = false;
+                                    let len = state.search_overlay_results.len();
+                                    if len > 0 {
+                                        state.search_overlay_selected_index =
+                                            (state.search_overlay_selected_index + 1) % len;
+                                    }
+                                }
+                                KeyCode::Left => {
+                                    if state.search_overlay_cursor_index > 0 {
+                                        state.search_overlay_cursor_index -= 1;
+                                    }
+                                }
+                                KeyCode::Right => {
+                                    if state.search_overlay_cursor_index
+                                        < state.search_overlay_input.chars().count()
+                                    {
+                                        state.search_overlay_cursor_index += 1;
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                    if let Some(target) = state
+                                        .search_overlay_results
+                                        .get(state.search_overlay_selected_index)
+                                        .cloned()
+                                    {
+                                        state.modal_mode = ascope::app::ModalMode::None;
+                                        state.search_overlay_input.clear();
+                                        state.search_overlay_results.clear();
+                                        state.search_overlay_cursor_index = 0;
+                                        state.search_overlay_focused = true;
+
+                                        state.jump_to_path(target.path.clone());
+
+                                        disable_raw_mode()?;
+                                        execute!(
+                                            terminal.backend_mut(),
+                                            LeaveAlternateScreen,
+                                            DisableMouseCapture
+                                        )?;
+                                        terminal.show_cursor()?;
+
+                                        let editor = std::env::var("EDITOR")
+                                            .unwrap_or_else(|_| "nvim".to_string());
+                                        let mut cmd = std::process::Command::new(&editor);
+
+                                        if editor.contains("nvim") || editor.contains("vim") {
+                                            if let Some(line) = target.line_number {
+                                                cmd.arg(format!("+{}", line));
+                                            }
+                                        }
+                                        cmd.arg(&target.path);
+
+                                        let mut child = cmd.spawn()?;
+                                        let _status = child.wait()?;
+
+                                        enable_raw_mode()?;
+                                        execute!(
+                                            terminal.backend_mut(),
+                                            EnterAlternateScreen,
+                                            EnableMouseCapture
+                                        )?;
+                                        terminal.hide_cursor()?;
+                                        terminal.clear()?;
+                                    }
+                                }
+                                KeyCode::Backspace => {
+                                    if state.search_overlay_cursor_index > 0 {
+                                        let char_idx = state.search_overlay_cursor_index - 1;
+                                        if let Some((byte_idx, _)) =
+                                            state.search_overlay_input.char_indices().nth(char_idx)
+                                        {
+                                            state.search_overlay_input.remove(byte_idx);
+                                            state.search_overlay_cursor_index -= 1;
+                                            state.update_search_overlay_results();
+                                        }
+                                    }
+                                }
+                                KeyCode::Delete => {
+                                    if state.search_overlay_cursor_index
+                                        < state.search_overlay_input.chars().count()
+                                    {
+                                        let char_idx = state.search_overlay_cursor_index;
+                                        if let Some((byte_idx, _)) =
+                                            state.search_overlay_input.char_indices().nth(char_idx)
+                                        {
+                                            state.search_overlay_input.remove(byte_idx);
+                                            state.update_search_overlay_results();
+                                        }
+                                    }
+                                }
+                                KeyCode::Char(c)
+                                    if !key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL)
+                                        && !key
+                                            .modifiers
+                                            .contains(crossterm::event::KeyModifiers::ALT) =>
+                                {
+                                    let char_idx = state.search_overlay_cursor_index;
+                                    let byte_idx = state
+                                        .search_overlay_input
+                                        .char_indices()
+                                        .nth(char_idx)
+                                        .map(|(i, _)| i)
+                                        .unwrap_or(state.search_overlay_input.len());
+                                    state.search_overlay_input.insert(byte_idx, c);
+                                    state.search_overlay_cursor_index += 1;
+                                    state.update_search_overlay_results();
+                                }
+                                _ => {}
+                            }
+                        } else {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    state.modal_mode = ascope::app::ModalMode::None;
+                                    state.search_overlay_input.clear();
+                                    state.search_overlay_results.clear();
+                                    state.search_overlay_cursor_index = 0;
+                                    state.search_overlay_focused = true;
+                                }
+                                KeyCode::Tab => {
+                                    if state.search_overlay_mode
+                                        == ascope::app::SearchOverlayMode::FuzzyFiles
+                                    {
+                                        state.search_overlay_mode =
+                                            ascope::app::SearchOverlayMode::LiveGrep;
+                                    } else {
+                                        state.search_overlay_mode =
+                                            ascope::app::SearchOverlayMode::FuzzyFiles;
+                                    }
+                                    state.update_search_overlay_results();
+                                }
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    let len = state.search_overlay_results.len();
+                                    if len > 0 {
+                                        state.search_overlay_selected_index =
+                                            (state.search_overlay_selected_index + len - 1) % len;
+                                    }
+                                }
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    let len = state.search_overlay_results.len();
+                                    if len > 0 {
+                                        state.search_overlay_selected_index =
+                                            (state.search_overlay_selected_index + 1) % len;
+                                    }
+                                }
+                                KeyCode::Char('p')
+                                    if key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                                {
+                                    let len = state.search_overlay_results.len();
+                                    if len > 0 {
+                                        state.search_overlay_selected_index =
+                                            (state.search_overlay_selected_index + len - 1) % len;
+                                    }
+                                }
+                                KeyCode::Char('n')
+                                    if key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                                {
+                                    let len = state.search_overlay_results.len();
+                                    if len > 0 {
+                                        state.search_overlay_selected_index =
+                                            (state.search_overlay_selected_index + 1) % len;
+                                    }
+                                }
+                                KeyCode::Char('i') | KeyCode::Char('a') => {
+                                    state.search_overlay_focused = true;
+                                }
+                                KeyCode::Enter => {
+                                    if let Some(target) = state
+                                        .search_overlay_results
+                                        .get(state.search_overlay_selected_index)
+                                        .cloned()
+                                    {
+                                        state.modal_mode = ascope::app::ModalMode::None;
+                                        state.search_overlay_input.clear();
+                                        state.search_overlay_results.clear();
+                                        state.search_overlay_cursor_index = 0;
+                                        state.search_overlay_focused = true;
+
+                                        state.jump_to_path(target.path.clone());
+
+                                        disable_raw_mode()?;
+                                        execute!(
+                                            terminal.backend_mut(),
+                                            LeaveAlternateScreen,
+                                            DisableMouseCapture
+                                        )?;
+                                        terminal.show_cursor()?;
+
+                                        let editor = std::env::var("EDITOR")
+                                            .unwrap_or_else(|_| "nvim".to_string());
+                                        let mut cmd = std::process::Command::new(&editor);
+
+                                        if editor.contains("nvim") || editor.contains("vim") {
+                                            if let Some(line) = target.line_number {
+                                                cmd.arg(format!("+{}", line));
+                                            }
+                                        }
+                                        cmd.arg(&target.path);
+
+                                        let mut child = cmd.spawn()?;
+                                        let _status = child.wait()?;
+
+                                        enable_raw_mode()?;
+                                        execute!(
+                                            terminal.backend_mut(),
+                                            EnterAlternateScreen,
+                                            EnableMouseCapture
+                                        )?;
+                                        terminal.hide_cursor()?;
+                                        terminal.clear()?;
+                                    }
+                                }
+                                KeyCode::Left
+                                | KeyCode::Right
+                                | KeyCode::Backspace
+                                | KeyCode::Delete => {
+                                    state.search_overlay_focused = true;
+                                }
+                                KeyCode::Char(c)
+                                    if !key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL)
+                                        && !key
+                                            .modifiers
+                                            .contains(crossterm::event::KeyModifiers::ALT) =>
+                                {
+                                    state.search_overlay_focused = true;
+                                    let char_idx = state.search_overlay_cursor_index;
+                                    let byte_idx = state
+                                        .search_overlay_input
+                                        .char_indices()
+                                        .nth(char_idx)
+                                        .map(|(i, _)| i)
+                                        .unwrap_or(state.search_overlay_input.len());
+                                    state.search_overlay_input.insert(byte_idx, c);
+                                    state.search_overlay_cursor_index += 1;
+                                    state.update_search_overlay_results();
+                                }
+                                _ => {}
+                            }
+                        }
+                    } else if state.modal_mode == ascope::app::ModalMode::DeleteConfirmation {
                         match key.code {
                             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
                                 state.modal_mode = ascope::app::ModalMode::None;
@@ -418,6 +744,26 @@ fn event_loop(
                             state.modal_input.clear();
                         }
                         KeyCode::Char(' ') => state.toggle_select(),
+                        KeyCode::Char('f')
+                            if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) =>
+                        {
+                            state.modal_mode = ascope::app::ModalMode::SearchOverlay;
+                            state.search_overlay_mode = ascope::app::SearchOverlayMode::FuzzyFiles;
+                            state.search_overlay_input.clear();
+                            state.search_overlay_selected_index = 0;
+                            state.search_overlay_cursor_index = 0;
+                            state.update_search_overlay_results();
+                        }
+                        KeyCode::Char('g')
+                            if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) =>
+                        {
+                            state.modal_mode = ascope::app::ModalMode::SearchOverlay;
+                            state.search_overlay_mode = ascope::app::SearchOverlayMode::LiveGrep;
+                            state.search_overlay_input.clear();
+                            state.search_overlay_selected_index = 0;
+                            state.search_overlay_cursor_index = 0;
+                            state.update_search_overlay_results();
+                        }
                         KeyCode::Char('y') => state.yank_full_path(),
                         KeyCode::Char('Y') => state.yank_filename(),
                         KeyCode::Char('X') => state.cut_file(),

@@ -35,6 +35,20 @@ pub enum ModalMode {
     Recent,
     OpenConfirmation,
     DeleteConfirmation,
+    SearchOverlay,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchOverlayMode {
+    FuzzyFiles,
+    LiveGrep,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub path: PathBuf,
+    pub line_number: Option<usize>,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +68,7 @@ pub struct Tab {
     pub navigation: crate::navigation::Navigation,
     pub all_entries: Vec<DirEntry>,
     pub scan_applied: bool,
-    pub preview_cache: Option<(PathBuf, String, Vec<Line<'static>>)>,
+    pub preview_cache: Option<(PathBuf, String, Option<usize>, Vec<Line<'static>>)>,
     pub git_ctx: Option<GitContext>,
 }
 
@@ -83,7 +97,7 @@ pub struct AppState {
     pub navigation: crate::navigation::Navigation,
     pub all_entries: Vec<DirEntry>,
     scan_applied: bool,
-    preview_cache: Option<(PathBuf, String, Vec<Line<'static>>)>,
+    preview_cache: Option<(PathBuf, String, Option<usize>, Vec<Line<'static>>)>,
     pub last_rendered_image: std::sync::Mutex<Option<ImageRenderCache>>,
     pub preview_tx: std::sync::mpsc::Sender<(
         PathBuf,
@@ -139,6 +153,14 @@ pub struct AppState {
     pub help_selected_index: usize,
     pub plugin_engine: Option<crate::plugin::engine::PluginEngine>,
     pub last_selection_time: std::time::Instant,
+    pub search_overlay_mode: SearchOverlayMode,
+    pub search_overlay_input: String,
+    pub search_overlay_results: Vec<SearchMatch>,
+    pub search_overlay_selected_index: usize,
+    pub search_overlay_cursor_index: usize,
+    pub search_overlay_focused: bool,
+    pub rg_query_tx: std::sync::mpsc::Sender<crate::search::ripgrep::RgSearchQuery>,
+    pub rg_match_rx: std::sync::mpsc::Receiver<crate::search::ripgrep::RgMessage>,
 }
 
 // --------------------------------------------------------------------------
@@ -207,6 +229,13 @@ impl AppState {
 
         let (preview_tx, preview_rx) = std::sync::mpsc::channel();
         let (worker_tx, worker_rx) = std::sync::mpsc::channel::<PreviewTask>();
+
+        let (rg_query_tx, rg_query_rx) = std::sync::mpsc::channel();
+        let (rg_match_tx, rg_match_rx) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            crate::search::ripgrep::spawn_rg_worker(rg_query_rx, rg_match_tx);
+        });
 
         let tx_clone = preview_tx.clone();
         std::thread::spawn(move || {
@@ -384,6 +413,14 @@ impl AppState {
             help_selected_index: 0,
             plugin_engine,
             last_selection_time: std::time::Instant::now(),
+            search_overlay_mode: SearchOverlayMode::FuzzyFiles,
+            search_overlay_input: String::new(),
+            search_overlay_results: Vec::new(),
+            search_overlay_selected_index: 0,
+            search_overlay_cursor_index: 0,
+            search_overlay_focused: true,
+            rg_query_tx,
+            rg_match_rx,
         }
     }
 
@@ -492,8 +529,35 @@ impl AppState {
 
             // Only apply the preview if it matches the currently highlighted item and search query
             if Some(&path) == selected.as_ref() && current_query == query {
-                self.preview_cache = Some((path, query, lines));
+                self.preview_cache = Some((path, query, None, lines));
                 *self.last_rendered_image.lock().unwrap() = cache;
+            }
+        }
+    }
+
+    pub fn poll_search_updates(&mut self) {
+        while let Ok(msg) = self.rg_match_rx.try_recv() {
+            if self.modal_mode == ModalMode::SearchOverlay
+                && self.search_overlay_mode == SearchOverlayMode::LiveGrep
+            {
+                match msg {
+                    crate::search::ripgrep::RgMessage::Match(m) => {
+                        if self.search_overlay_results.len() < 200 {
+                            let text = format!(
+                                "{}:{}: {}",
+                                m.path.file_name().unwrap_or_default().to_string_lossy(),
+                                m.line_number,
+                                m.text.trim_end()
+                            );
+                            self.search_overlay_results.push(SearchMatch {
+                                path: m.path,
+                                line_number: Some(m.line_number),
+                                text,
+                            });
+                        }
+                    }
+                    crate::search::ripgrep::RgMessage::Finished => {}
+                }
             }
         }
     }
@@ -501,12 +565,33 @@ impl AppState {
     pub fn update_preview_cache(&mut self, width: u16, height: u16) {
         // Poll for asynchronous preview results first
         self.poll_preview_updates();
+        // Poll for search updates
+        self.poll_search_updates();
 
-        let selected = self.selected_item().map(|x| x.path);
-        let query = self.navigation.filter_query().unwrap_or("").to_string();
+        let (selected, target_line) = if self.modal_mode == ModalMode::SearchOverlay {
+            if let Some(res) = self
+                .search_overlay_results
+                .get(self.search_overlay_selected_index)
+            {
+                (Some(res.path.clone()), res.line_number)
+            } else {
+                (None, None)
+            }
+        } else {
+            (self.selected_item().map(|x| x.path), None)
+        };
 
-        if let Some((cached_path, cached_query, _)) = &self.preview_cache {
-            if Some(cached_path) == selected.as_ref() && cached_query == &query {
+        let query = if self.modal_mode == ModalMode::SearchOverlay {
+            self.search_overlay_input.clone()
+        } else {
+            self.navigation.filter_query().unwrap_or("").to_string()
+        };
+
+        if let Some((cached_path, cached_query, cached_target_line, _)) = &self.preview_cache {
+            if Some(cached_path) == selected.as_ref()
+                && cached_query == &query
+                && *cached_target_line == target_line
+            {
                 return;
             }
         }
@@ -519,6 +604,7 @@ impl AppState {
                     self.preview_cache = Some((
                         path.clone(),
                         query.clone(),
+                        None,
                         vec![Line::from("[Loading preview...]")],
                     ));
                     *self.last_rendered_image.lock().unwrap() = None;
@@ -535,8 +621,9 @@ impl AppState {
                     return;
                 }
 
-                let lines = crate::ui::widgets::build_preview_lines(&path, &query);
-                self.preview_cache = Some((path, query, lines));
+                let lines =
+                    crate::ui::widgets::build_preview_lines_focused(&path, &query, target_line);
+                self.preview_cache = Some((path, query, target_line, lines));
                 *self.last_rendered_image.lock().unwrap() = None;
                 return;
             }
@@ -548,7 +635,7 @@ impl AppState {
 
     /// Access the cached highlighted lines of the currently selected file.
     pub fn preview_lines(&self) -> &[Line<'static>] {
-        if let Some((_, _, lines)) = &self.preview_cache {
+        if let Some((_, _, _, lines)) = &self.preview_cache {
             lines
         } else {
             &[]
@@ -1288,6 +1375,82 @@ impl AppState {
             self.navigation.set_filter(Some(query), &self.all_entries);
         }
         self.reset_selection_timeout();
+    }
+
+    pub fn update_search_overlay_results(&mut self) {
+        if self.search_overlay_input.is_empty() {
+            // Return all files by default if search query is empty
+            self.search_overlay_results = self
+                .all_entries
+                .iter()
+                .filter(|e| e.entry_type == EntryType::File)
+                .map(|e| SearchMatch {
+                    path: e.path.clone(),
+                    line_number: None,
+                    text: e
+                        .path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                })
+                .collect();
+            self.search_overlay_selected_index = 0;
+            return;
+        }
+
+        match self.search_overlay_mode {
+            SearchOverlayMode::FuzzyFiles => {
+                use nucleo::{
+                    pattern::{CaseMatching, Normalization, Pattern},
+                    Config, Matcher,
+                };
+
+                let mut matcher = Matcher::new(Config::DEFAULT);
+                let pattern = Pattern::parse(
+                    &self.search_overlay_input,
+                    CaseMatching::Smart,
+                    Normalization::Smart,
+                );
+
+                let mut results = Vec::new();
+                for item in &self.all_entries {
+                    if item.entry_type == EntryType::File {
+                        let filename = item.path.file_name().unwrap_or_default().to_string_lossy();
+                        let haystack = nucleo::Utf32String::from(filename.as_ref());
+                        if let Some(score) = pattern.score(haystack.slice(..), &mut matcher) {
+                            results.push((item.clone(), score));
+                        }
+                    }
+                }
+                results.sort_by_key(|b| std::cmp::Reverse(b.1));
+
+                self.search_overlay_results = results
+                    .into_iter()
+                    .map(|(e, _)| SearchMatch {
+                        path: e.path.clone(),
+                        line_number: None,
+                        text: e
+                            .path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
+                    })
+                    .collect();
+                self.search_overlay_selected_index = 0;
+            }
+            SearchOverlayMode::LiveGrep => {
+                self.search_overlay_results.clear();
+                self.search_overlay_selected_index = 0;
+                let _ = self
+                    .rg_query_tx
+                    .send(crate::search::ripgrep::RgSearchQuery {
+                        query: self.search_overlay_input.clone(),
+                        dir: self.current_path.clone(),
+                    });
+            }
+        }
     }
 }
 

@@ -11,3 +11,7 @@ pub mod plugin {
     pub mod engine;
     pub mod manifest;
 }
+
+pub mod search {
+    pub mod ripgrep;
+}
