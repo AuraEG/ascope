@@ -1637,13 +1637,95 @@ fn render_help_modal(f: &mut Frame, state: &AppState) {
     f.render_stateful_widget(table, area, &mut table_state);
 }
 
-fn render_search_modal(f: &mut Frame, _state: &AppState, area: Rect) {
-    let block = Block::default()
-        .title(" Unified Search ")
-        .borders(Borders::ALL);
-    let modal_area = centered_rect(60, 40, area);
+fn render_search_modal(f: &mut Frame, state: &AppState, area: Rect) {
+    use crate::app::SearchOverlayMode;
+
+    let modal_area = centered_rect(70, 50, area);
     f.render_widget(Clear, modal_area);
+
+    let mode_title = match state.search_overlay_mode {
+        SearchOverlayMode::FuzzyFiles => " Fuzzy File Finder ",
+        SearchOverlayMode::LiveGrep => " Live Grep Content ",
+    };
+
+    let footer = Line::from(vec![
+        Span::styled(" [Tab] ", Style::default().fg(Color::Yellow).bold()),
+        Span::raw("toggle mode │"),
+        Span::styled(" [j/k] ", Style::default().fg(Color::Cyan).bold()),
+        Span::raw("navigate │"),
+        Span::styled(" [Enter] ", Style::default().fg(Color::Green).bold()),
+        Span::raw("open │"),
+        Span::styled(" [Esc] ", Style::default().fg(Color::Red).bold()),
+        Span::raw("close"),
+    ]);
+
+    let block = Block::default()
+        .title(Line::from(vec![
+            Span::styled(" 󰍉 ", Style::default().fg(Color::Yellow).bold()),
+            Span::styled(mode_title, Style::default().fg(Color::White).bold()),
+        ]))
+        .title_bottom(footer)
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(240, 200, 50))) // elegant gold border
+        .style(Style::default().bg(Color::Rgb(25, 25, 30)));
+
+    let inner_area = block.inner(modal_area);
     f.render_widget(block, modal_area);
+
+    // Split inner area into:
+    // 1. Prompt / Input (height 3)
+    // 2. Results List (remaining height)
+    let chunks = Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(1),
+        ])
+        .split(inner_area);
+
+    // 1. Draw input prompt
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(" Search Query ");
+    let input_para = Paragraph::new(state.search_overlay_input.as_str())
+        .block(input_block)
+        .style(Style::default().fg(Color::White));
+    f.render_widget(input_para, chunks[0]);
+
+    // 2. Draw results list
+    let list_items: Vec<ListItem> = state.search_overlay_results
+        .iter()
+        .enumerate()
+        .map(|(i, result)| {
+            let is_selected = i == state.search_overlay_selected_index;
+            let icon = match state.search_overlay_mode {
+                SearchOverlayMode::FuzzyFiles => "󰈔 ",
+                SearchOverlayMode::LiveGrep => "󱘗 ",
+            };
+
+            let text_style = if is_selected {
+                Style::default().fg(Color::Black).bg(Color::Cyan).bold()
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            ListItem::new(Line::from(vec![
+                Span::styled(icon, Style::default().fg(Color::Gray)),
+                Span::styled(result.text.clone(), text_style),
+            ]))
+        })
+        .collect();
+
+    let list_block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(format!(" Results ({}) ", state.search_overlay_results.len()));
+
+    let list = List::new(list_items)
+        .block(list_block);
+    f.render_widget(list, chunks[1]);
 }
 
 // --------------------------------------------------------------------------

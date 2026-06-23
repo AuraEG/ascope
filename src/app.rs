@@ -39,6 +39,19 @@ pub enum ModalMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchOverlayMode {
+    FuzzyFiles,
+    LiveGrep,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub path: PathBuf,
+    pub line_number: Option<usize>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewType {
     Text,
     Image,
@@ -140,6 +153,10 @@ pub struct AppState {
     pub help_selected_index: usize,
     pub plugin_engine: Option<crate::plugin::engine::PluginEngine>,
     pub last_selection_time: std::time::Instant,
+    pub search_overlay_mode: SearchOverlayMode,
+    pub search_overlay_input: String,
+    pub search_overlay_results: Vec<SearchMatch>,
+    pub search_overlay_selected_index: usize,
 }
 
 // --------------------------------------------------------------------------
@@ -385,6 +402,10 @@ impl AppState {
             help_selected_index: 0,
             plugin_engine,
             last_selection_time: std::time::Instant::now(),
+            search_overlay_mode: SearchOverlayMode::FuzzyFiles,
+            search_overlay_input: String::new(),
+            search_overlay_results: Vec::new(),
+            search_overlay_selected_index: 0,
         }
     }
 
@@ -1289,6 +1310,60 @@ impl AppState {
             self.navigation.set_filter(Some(query), &self.all_entries);
         }
         self.reset_selection_timeout();
+    }
+
+    pub fn update_search_overlay_results(&mut self) {
+        if self.search_overlay_input.is_empty() {
+            // Return all files by default if search query is empty
+            self.search_overlay_results = self.all_entries
+                .iter()
+                .filter(|e| e.entry_type == EntryType::File)
+                .map(|e| SearchMatch {
+                    path: e.path.clone(),
+                    line_number: None,
+                    text: e.path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                })
+                .collect();
+            self.search_overlay_selected_index = 0;
+            return;
+        }
+
+        match self.search_overlay_mode {
+            SearchOverlayMode::FuzzyFiles => {
+                use nucleo::{
+                    pattern::{CaseMatching, Normalization, Pattern},
+                    Config, Matcher,
+                };
+
+                let mut matcher = Matcher::new(Config::DEFAULT);
+                let pattern = Pattern::parse(&self.search_overlay_input, CaseMatching::Smart, Normalization::Smart);
+
+                let mut results = Vec::new();
+                for item in &self.all_entries {
+                    if item.entry_type == EntryType::File {
+                        let filename = item.path.file_name().unwrap_or_default().to_string_lossy();
+                        let haystack = nucleo::Utf32String::from(filename.as_ref());
+                        if let Some(score) = pattern.score(haystack.slice(..), &mut matcher) {
+                            results.push((item.clone(), score));
+                        }
+                    }
+                }
+                results.sort_by_key(|b| std::cmp::Reverse(b.1));
+
+                self.search_overlay_results = results
+                    .into_iter()
+                    .map(|(e, _)| SearchMatch {
+                        path: e.path.clone(),
+                        line_number: None,
+                        text: e.path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                    })
+                    .collect();
+                self.search_overlay_selected_index = 0;
+            }
+            SearchOverlayMode::LiveGrep => {
+                // To be implemented in Task 12
+            }
+        }
     }
 }
 
