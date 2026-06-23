@@ -157,6 +157,8 @@ pub struct AppState {
     pub search_overlay_input: String,
     pub search_overlay_results: Vec<SearchMatch>,
     pub search_overlay_selected_index: usize,
+    pub rg_query_tx: std::sync::mpsc::Sender<crate::search::ripgrep::RgSearchQuery>,
+    pub rg_match_rx: std::sync::mpsc::Receiver<crate::search::ripgrep::RgMessage>,
 }
 
 // --------------------------------------------------------------------------
@@ -225,6 +227,13 @@ impl AppState {
 
         let (preview_tx, preview_rx) = std::sync::mpsc::channel();
         let (worker_tx, worker_rx) = std::sync::mpsc::channel::<PreviewTask>();
+
+        let (rg_query_tx, rg_query_rx) = std::sync::mpsc::channel();
+        let (rg_match_tx, rg_match_rx) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            crate::search::ripgrep::spawn_rg_worker(rg_query_rx, rg_match_tx);
+        });
 
         let tx_clone = preview_tx.clone();
         std::thread::spawn(move || {
@@ -406,6 +415,8 @@ impl AppState {
             search_overlay_input: String::new(),
             search_overlay_results: Vec::new(),
             search_overlay_selected_index: 0,
+            rg_query_tx,
+            rg_match_rx,
         }
     }
 
@@ -520,9 +531,36 @@ impl AppState {
         }
     }
 
+    pub fn poll_search_updates(&mut self) {
+        while let Ok(msg) = self.rg_match_rx.try_recv() {
+            if self.modal_mode == ModalMode::SearchOverlay && self.search_overlay_mode == SearchOverlayMode::LiveGrep {
+                match msg {
+                    crate::search::ripgrep::RgMessage::Match(m) => {
+                        if self.search_overlay_results.len() < 200 {
+                            let text = format!(
+                                "{}:{}: {}",
+                                m.path.file_name().unwrap_or_default().to_string_lossy(),
+                                m.line_number,
+                                m.text.trim_end()
+                            );
+                            self.search_overlay_results.push(SearchMatch {
+                                path: m.path,
+                                line_number: Some(m.line_number),
+                                text,
+                            });
+                        }
+                    }
+                    crate::search::ripgrep::RgMessage::Finished => {}
+                }
+            }
+        }
+    }
+
     pub fn update_preview_cache(&mut self, width: u16, height: u16) {
         // Poll for asynchronous preview results first
         self.poll_preview_updates();
+        // Poll for search updates
+        self.poll_search_updates();
 
         let selected = self.selected_item().map(|x| x.path);
         let query = self.navigation.filter_query().unwrap_or("").to_string();
@@ -1361,7 +1399,12 @@ impl AppState {
                 self.search_overlay_selected_index = 0;
             }
             SearchOverlayMode::LiveGrep => {
-                // To be implemented in Task 12
+                self.search_overlay_results.clear();
+                self.search_overlay_selected_index = 0;
+                let _ = self.rg_query_tx.send(crate::search::ripgrep::RgSearchQuery {
+                    query: self.search_overlay_input.clone(),
+                    dir: self.current_path.clone(),
+                });
             }
         }
     }
