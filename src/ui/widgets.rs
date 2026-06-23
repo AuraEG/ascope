@@ -735,6 +735,14 @@ fn is_binary_file(path: &Path) -> bool {
 }
 
 pub fn build_preview_lines(path: &Path, query: &str) -> Vec<Line<'static>> {
+    build_preview_lines_focused(path, query, None)
+}
+
+pub fn build_preview_lines_focused(
+    path: &Path,
+    query: &str,
+    target_line: Option<usize>,
+) -> Vec<Line<'static>> {
     if is_binary_file(path) {
         return vec![Line::from("[Binary File - Preview Not Available]")];
     }
@@ -746,13 +754,18 @@ pub fn build_preview_lines(path: &Path, query: &str) -> Vec<Line<'static>> {
     use bat::line_range::{HighlightedLineRanges, LineRange, LineRanges};
     use bat::style::{StyleComponent, StyleComponents};
 
-    let (match_line, total_lines) = match get_match_line_and_total(path, query) {
-        Ok(x) => x,
-        Err(error) => {
-            if error.kind() == std::io::ErrorKind::InvalidData {
-                return vec![Line::from("[Binary File - Preview Not Available]")];
-            } else {
-                return vec![Line::from(format!("[x] Preview error: {error}"))];
+    let (match_line, total_lines) = if let Some(line) = target_line {
+        let (_, total) = get_match_line_and_total(path, "").unwrap_or((0, 0));
+        (line.saturating_sub(1), total)
+    } else {
+        match get_match_line_and_total(path, query) {
+            Ok(x) => x,
+            Err(error) => {
+                if error.kind() == std::io::ErrorKind::InvalidData {
+                    return vec![Line::from("[Binary File - Preview Not Available]")];
+                } else {
+                    return vec![Line::from(format!("[x] Preview error: {error}"))];
+                }
             }
         }
     };
@@ -765,10 +778,15 @@ pub fn build_preview_lines(path: &Path, query: &str) -> Vec<Line<'static>> {
     let end_line = end.max(1);
 
     let assets = HighlightingAssets::from_binary();
-    let highlighted_lines = if !query.is_empty() {
+    let highlighted_lines = if target_line.is_some() || !query.is_empty() {
+        let highlight = if let Some(line) = target_line {
+            line
+        } else {
+            match_line + 1
+        };
         HighlightedLineRanges(LineRanges::from(vec![LineRange::new(
-            match_line + 1,
-            match_line + 1,
+            highlight,
+            highlight,
         )]))
     } else {
         HighlightedLineRanges::default()
