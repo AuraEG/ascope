@@ -113,6 +113,11 @@ fn render_modal(f: &mut Frame, state: &AppState) {
         return;
     }
 
+    if state.modal_mode == crate::app::ModalMode::SearchOverlay {
+        render_search_modal(f, state, f.size());
+        return;
+    }
+
     let area = centered_rect(70, 60, f.size());
     let screen = f.size();
 
@@ -1630,6 +1635,15 @@ fn render_help_modal(f: &mut Frame, state: &AppState) {
 
     f.render_widget(Clear, area);
     f.render_stateful_widget(table, area, &mut table_state);
+}
+
+fn render_search_modal(f: &mut Frame, _state: &AppState, area: Rect) {
+    let block = Block::default()
+        .title(" Unified Search ")
+        .borders(Borders::ALL);
+    let modal_area = centered_rect(60, 40, area);
+    f.render_widget(Clear, modal_area);
+    f.render_widget(block, modal_area);
 }
 
 // --------------------------------------------------------------------------

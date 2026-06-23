@@ -35,6 +35,7 @@ pub enum ModalMode {
     Recent,
     OpenConfirmation,
     DeleteConfirmation,
+    SearchOverlay,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
