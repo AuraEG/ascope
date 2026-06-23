@@ -68,7 +68,7 @@ pub struct Tab {
     pub navigation: crate::navigation::Navigation,
     pub all_entries: Vec<DirEntry>,
     pub scan_applied: bool,
-    pub preview_cache: Option<(PathBuf, String, Vec<Line<'static>>)>,
+    pub preview_cache: Option<(PathBuf, String, Option<usize>, Vec<Line<'static>>)>,
     pub git_ctx: Option<GitContext>,
 }
 
@@ -97,7 +97,7 @@ pub struct AppState {
     pub navigation: crate::navigation::Navigation,
     pub all_entries: Vec<DirEntry>,
     scan_applied: bool,
-    preview_cache: Option<(PathBuf, String, Vec<Line<'static>>)>,
+    preview_cache: Option<(PathBuf, String, Option<usize>, Vec<Line<'static>>)>,
     pub last_rendered_image: std::sync::Mutex<Option<ImageRenderCache>>,
     pub preview_tx: std::sync::mpsc::Sender<(
         PathBuf,
@@ -525,7 +525,7 @@ impl AppState {
 
             // Only apply the preview if it matches the currently highlighted item and search query
             if Some(&path) == selected.as_ref() && current_query == query {
-                self.preview_cache = Some((path, query, lines));
+                self.preview_cache = Some((path, query, None, lines));
                 *self.last_rendered_image.lock().unwrap() = cache;
             }
         }
@@ -562,11 +562,24 @@ impl AppState {
         // Poll for search updates
         self.poll_search_updates();
 
-        let selected = self.selected_item().map(|x| x.path);
-        let query = self.navigation.filter_query().unwrap_or("").to_string();
+        let (selected, target_line) = if self.modal_mode == ModalMode::SearchOverlay {
+            if let Some(res) = self.search_overlay_results.get(self.search_overlay_selected_index) {
+                (Some(res.path.clone()), res.line_number)
+            } else {
+                (None, None)
+            }
+        } else {
+            (self.selected_item().map(|x| x.path), None)
+        };
 
-        if let Some((cached_path, cached_query, _)) = &self.preview_cache {
-            if Some(cached_path) == selected.as_ref() && cached_query == &query {
+        let query = if self.modal_mode == ModalMode::SearchOverlay {
+            self.search_overlay_input.clone()
+        } else {
+            self.navigation.filter_query().unwrap_or("").to_string()
+        };
+
+        if let Some((cached_path, cached_query, cached_target_line, _)) = &self.preview_cache {
+            if Some(cached_path) == selected.as_ref() && cached_query == &query && *cached_target_line == target_line {
                 return;
             }
         }
@@ -579,6 +592,7 @@ impl AppState {
                     self.preview_cache = Some((
                         path.clone(),
                         query.clone(),
+                        None,
                         vec![Line::from("[Loading preview...]")],
                     ));
                     *self.last_rendered_image.lock().unwrap() = None;
@@ -595,8 +609,8 @@ impl AppState {
                     return;
                 }
 
-                let lines = crate::ui::widgets::build_preview_lines(&path, &query);
-                self.preview_cache = Some((path, query, lines));
+                let lines = crate::ui::widgets::build_preview_lines_focused(&path, &query, target_line);
+                self.preview_cache = Some((path, query, target_line, lines));
                 *self.last_rendered_image.lock().unwrap() = None;
                 return;
             }
@@ -608,7 +622,7 @@ impl AppState {
 
     /// Access the cached highlighted lines of the currently selected file.
     pub fn preview_lines(&self) -> &[Line<'static>] {
-        if let Some((_, _, lines)) = &self.preview_cache {
+        if let Some((_, _, _, lines)) = &self.preview_cache {
             lines
         } else {
             &[]
