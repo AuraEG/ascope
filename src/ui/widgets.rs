@@ -1831,7 +1831,11 @@ fn render_command_palette(f: &mut Frame, state: &AppState, area: Rect) {
         Span::raw("close"),
     ]);
 
-    let border_color = Color::Rgb(160, 32, 240); // vibrant purple
+    let border_color = if state.command_palette_input.starts_with('!') {
+        Color::Yellow
+    } else {
+        Color::Rgb(160, 32, 240) // vibrant purple
+    };
 
     let block = Block::default()
         .title(Line::from(vec![
@@ -1853,10 +1857,15 @@ fn render_command_palette(f: &mut Frame, state: &AppState, area: Rect) {
         .split(inner_area);
 
     // Prompt input
+    let input_title = if state.command_palette_input.starts_with('!') {
+        " Enter your Command "
+    } else {
+        " Search Commands "
+    };
     let input_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
-        .title(" Search Commands ");
+        .title(input_title);
     let input_para = Paragraph::new(state.command_palette_input.as_str())
         .block(input_block)
         .style(Style::default().fg(Color::White));

@@ -24,3 +24,22 @@ fn test_command_palette_fuzzy_matching() {
     assert_eq!(state.command_palette_results.len(), 1);
     assert_eq!(state.command_palette_results[0].name, "npm run dev");
 }
+
+#[test]
+fn test_command_palette_custom_shell_command() {
+    let dir = tempdir().unwrap();
+    let mut state = AppState::new(dir.path().to_path_buf());
+    
+    state.command_palette_input = "!echo hello".to_string();
+    state.update_command_palette_results();
+    
+    assert_eq!(state.command_palette_results.len(), 1);
+    assert_eq!(state.command_palette_results[0].cmd, "echo hello");
+    assert_eq!(state.command_palette_results[0].source, "Shell");
+    
+    // Empty custom command
+    state.command_palette_input = "!".to_string();
+    state.update_command_palette_results();
+    assert_eq!(state.command_palette_results.len(), 1);
+    assert_eq!(state.command_palette_results[0].cmd, "");
+}

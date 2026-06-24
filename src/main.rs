@@ -165,7 +165,252 @@ fn event_loop(
                         _ => {}
                     }
                 } else if state.modal_mode != ascope::app::ModalMode::None {
-                    if state.modal_mode == ascope::app::ModalMode::SearchOverlay {
+                    if state.modal_mode == ascope::app::ModalMode::CommandPalette {
+                        if state.command_palette_focused {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    state.modal_mode = ascope::app::ModalMode::None;
+                                    state.command_palette_input.clear();
+                                    state.command_palette_cursor_index = 0;
+                                    state.command_palette_focused = true;
+                                }
+                                KeyCode::Up | KeyCode::Char('p') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                                    state.command_palette_focused = false;
+                                    let len = state.command_palette_results.len();
+                                    if len > 0 {
+                                        state.command_palette_selected_index = (state.command_palette_selected_index + len - 1) % len;
+                                    }
+                                }
+                                KeyCode::Down | KeyCode::Char('n') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                                    state.command_palette_focused = false;
+                                    let len = state.command_palette_results.len();
+                                    if len > 0 {
+                                        state.command_palette_selected_index = (state.command_palette_selected_index + 1) % len;
+                                    }
+                                }
+                                KeyCode::Up => {
+                                    state.command_palette_focused = false;
+                                    let len = state.command_palette_results.len();
+                                    if len > 0 {
+                                        state.command_palette_selected_index = (state.command_palette_selected_index + len - 1) % len;
+                                    }
+                                }
+                                KeyCode::Down => {
+                                    state.command_palette_focused = false;
+                                    let len = state.command_palette_results.len();
+                                    if len > 0 {
+                                        state.command_palette_selected_index = (state.command_palette_selected_index + 1) % len;
+                                    }
+                                }
+                                KeyCode::Left => {
+                                    if state.command_palette_cursor_index > 0 {
+                                        state.command_palette_cursor_index -= 1;
+                                    }
+                                }
+                                KeyCode::Right => {
+                                    if state.command_palette_cursor_index < state.command_palette_input.chars().count() {
+                                        state.command_palette_cursor_index += 1;
+                                    }
+                                }
+                                KeyCode::Backspace => {
+                                    if state.command_palette_cursor_index > 0 {
+                                        let char_idx = state.command_palette_cursor_index - 1;
+                                        if let Some((byte_idx, _)) = state.command_palette_input.char_indices().nth(char_idx) {
+                                            state.command_palette_input.remove(byte_idx);
+                                            state.command_palette_cursor_index -= 1;
+                                            state.update_command_palette_results();
+                                        }
+                                    }
+                                }
+                                KeyCode::Delete => {
+                                    if state.command_palette_cursor_index < state.command_palette_input.chars().count() {
+                                        let char_idx = state.command_palette_cursor_index;
+                                        if let Some((byte_idx, _)) = state.command_palette_input.char_indices().nth(char_idx) {
+                                            state.command_palette_input.remove(byte_idx);
+                                            state.update_command_palette_results();
+                                        }
+                                    }
+                                }
+                                KeyCode::Char(c) if !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
+                                    let char_idx = state.command_palette_cursor_index;
+                                    let byte_idx = state.command_palette_input.char_indices().nth(char_idx).map(|(i, _)| i).unwrap_or(state.command_palette_input.len());
+                                    state.command_palette_input.insert(byte_idx, c);
+                                    state.command_palette_cursor_index += 1;
+                                    state.update_command_palette_results();
+                                }
+                                KeyCode::Enter => {
+                                    if let Some(target) = state.command_palette_results.get(state.command_palette_selected_index).cloned() {
+                                        if !target.cmd.is_empty() {
+                                            state.modal_mode = ascope::app::ModalMode::None;
+                                            state.command_palette_input.clear();
+                                            state.command_palette_cursor_index = 0;
+                                            state.command_palette_focused = true;
+
+                                            if target.cmd == "reload_plugins" {
+                                                if let Some(ref mut engine) = state.plugin_engine {
+                                                    let _ = engine.load_plugins();
+                                                }
+                                            } else {
+                                                disable_raw_mode()?;
+                                                execute!(
+                                                    terminal.backend_mut(),
+                                                    LeaveAlternateScreen,
+                                                    DisableMouseCapture
+                                                )?;
+                                                terminal.show_cursor()?;
+
+                                                println!("\x1b[35m=== Executing Action ===\x1b[0m");
+                                                println!("Command: {}\n", target.cmd);
+
+                                                #[cfg(unix)]
+                                                let status = std::process::Command::new("sh")
+                                                    .arg("-c")
+                                                    .arg(&target.cmd)
+                                                    .status();
+
+                                                #[cfg(windows)]
+                                                let status = std::process::Command::new("cmd")
+                                                    .arg("/C")
+                                                    .arg(&target.cmd)
+                                                    .status();
+
+                                                match status {
+                                                    Ok(s) => println!("\n\x1b[32mCommand finished with status: {}\x1b[0m", s),
+                                                    Err(e) => println!("\n\x1b[31mFailed to run command: {}\x1b[0m", e),
+                                                }
+
+                                                println!("\nPress Enter to return to AuraScope...");
+                                                let mut input = String::new();
+                                                let _ = std::io::stdin().read_line(&mut input);
+
+                                                enable_raw_mode()?;
+                                                execute!(
+                                                    terminal.backend_mut(),
+                                                    EnterAlternateScreen,
+                                                    DisableMouseCapture
+                                                )?;
+                                                terminal.hide_cursor()?;
+                                                terminal.clear()?;
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        } else {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    state.modal_mode = ascope::app::ModalMode::None;
+                                    state.command_palette_input.clear();
+                                    state.command_palette_cursor_index = 0;
+                                    state.command_palette_focused = true;
+                                }
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    if state.command_palette_selected_index == 0 {
+                                        state.command_palette_focused = true;
+                                    } else {
+                                        let len = state.command_palette_results.len();
+                                        if len > 0 {
+                                            state.command_palette_selected_index = (state.command_palette_selected_index + len - 1) % len;
+                                        }
+                                    }
+                                }
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    let len = state.command_palette_results.len();
+                                    if len > 0 {
+                                        state.command_palette_selected_index = (state.command_palette_selected_index + 1) % len;
+                                    }
+                                }
+                                KeyCode::Char('i') | KeyCode::Char('a') | KeyCode::Insert => {
+                                    state.command_palette_focused = true;
+                                }
+                                KeyCode::Backspace
+                                | KeyCode::Delete
+                                | KeyCode::Left
+                                | KeyCode::Right => {
+                                    state.command_palette_focused = true;
+                                }
+                                KeyCode::Char(c)
+                                    if !key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL)
+                                        && !key
+                                            .modifiers
+                                            .contains(crossterm::event::KeyModifiers::ALT) =>
+                                {
+                                    state.command_palette_focused = true;
+                                    let char_idx = state.command_palette_cursor_index;
+                                    let byte_idx = state
+                                        .command_palette_input
+                                        .char_indices()
+                                        .nth(char_idx)
+                                        .map(|(i, _)| i)
+                                        .unwrap_or(state.command_palette_input.len());
+                                    state.command_palette_input.insert(byte_idx, c);
+                                    state.command_palette_cursor_index += 1;
+                                    state.update_command_palette_results();
+                                }
+                                KeyCode::Enter => {
+                                    if let Some(target) = state.command_palette_results.get(state.command_palette_selected_index).cloned() {
+                                        if !target.cmd.is_empty() {
+                                            state.modal_mode = ascope::app::ModalMode::None;
+                                            state.command_palette_input.clear();
+                                            state.command_palette_cursor_index = 0;
+                                            state.command_palette_focused = true;
+
+                                            if target.cmd == "reload_plugins" {
+                                                if let Some(ref mut engine) = state.plugin_engine {
+                                                    let _ = engine.load_plugins();
+                                                }
+                                            } else {
+                                                disable_raw_mode()?;
+                                                execute!(
+                                                    terminal.backend_mut(),
+                                                    LeaveAlternateScreen,
+                                                    DisableMouseCapture
+                                                )?;
+                                                terminal.show_cursor()?;
+
+                                                println!("\x1b[35m=== Executing Action ===\x1b[0m");
+                                                println!("Command: {}\n", target.cmd);
+
+                                                #[cfg(unix)]
+                                                let status = std::process::Command::new("sh")
+                                                    .arg("-c")
+                                                    .arg(&target.cmd)
+                                                    .status();
+
+                                                #[cfg(windows)]
+                                                let status = std::process::Command::new("cmd")
+                                                    .arg("/C")
+                                                    .arg(&target.cmd)
+                                                    .status();
+
+                                                match status {
+                                                    Ok(s) => println!("\n\x1b[32mCommand finished with status: {}\x1b[0m", s),
+                                                    Err(e) => println!("\n\x1b[31mFailed to run command: {}\x1b[0m", e),
+                                                }
+
+                                                println!("\nPress Enter to return to AuraScope...");
+                                                let mut input = String::new();
+                                                let _ = std::io::stdin().read_line(&mut input);
+
+                                                enable_raw_mode()?;
+                                                execute!(
+                                                    terminal.backend_mut(),
+                                                    EnterAlternateScreen,
+                                                    DisableMouseCapture
+                                                )?;
+                                                terminal.hide_cursor()?;
+                                                terminal.clear()?;
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    } else if state.modal_mode == ascope::app::ModalMode::SearchOverlay {
                         if state.search_overlay_focused {
                             match key.code {
                                 KeyCode::Esc => {
@@ -771,6 +1016,26 @@ fn event_loop(
                         KeyCode::Char('o') => state.open_in_system(),
                         KeyCode::Char('d') => state.request_delete(),
                         KeyCode::Char('r') => state.request_rename(),
+                        KeyCode::Char('p')
+                            if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) =>
+                        {
+                            state.modal_mode = ascope::app::ModalMode::CommandPalette;
+                            state.command_palette_input.clear();
+                            state.command_palette_selected_index = 0;
+                            state.command_palette_cursor_index = 0;
+                            state.command_palette_focused = true;
+                            state.rebuild_command_palette_candidates();
+                            state.update_command_palette_results();
+                        }
+                        KeyCode::Char(':') => {
+                            state.modal_mode = ascope::app::ModalMode::CommandPalette;
+                            state.command_palette_input.clear();
+                            state.command_palette_selected_index = 0;
+                            state.command_palette_cursor_index = 0;
+                            state.command_palette_focused = true;
+                            state.rebuild_command_palette_candidates();
+                            state.update_command_palette_results();
+                        }
                         KeyCode::Char('?') => {
                             state.show_help = true;
                             state.help_selected_index = 0;

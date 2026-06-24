@@ -1490,6 +1490,25 @@ impl AppState {
     }
 
     pub fn update_command_palette_results(&mut self) {
+        if self.command_palette_input.starts_with('!') {
+            let cmd_to_run = self.command_palette_input[1..].trim().to_string();
+            if cmd_to_run.is_empty() {
+                self.command_palette_results = vec![crate::project::detector::DetectedCommand {
+                    name: "Enter a shell command to execute...".to_string(),
+                    cmd: "".to_string(),
+                    source: "Shell".to_string(),
+                }];
+            } else {
+                self.command_palette_results = vec![crate::project::detector::DetectedCommand {
+                    name: format!("Run: {}", cmd_to_run),
+                    cmd: cmd_to_run.clone(),
+                    source: "Shell".to_string(),
+                }];
+            }
+            self.command_palette_selected_index = 0;
+            return;
+        }
+
         if self.command_palette_input.is_empty() {
             self.command_palette_results = self.command_palette_candidates.clone();
             self.command_palette_selected_index = 0;
@@ -1519,6 +1538,26 @@ impl AppState {
 
         self.command_palette_results = results.into_iter().map(|(item, _)| item).collect();
         self.command_palette_selected_index = 0;
+    }
+
+    pub fn rebuild_command_palette_candidates(&mut self) {
+        let root = &self.current_path;
+        let mut candidates = crate::project::detector::detect_project_commands(root);
+        let session_cfg = crate::config::session::parse_session_config(root);
+        for custom in session_cfg.commands {
+            candidates.push(crate::project::detector::DetectedCommand {
+                name: custom.name,
+                cmd: custom.cmd,
+                source: ".ascope.toml".to_string(),
+            });
+        }
+        candidates.push(crate::project::detector::DetectedCommand {
+            name: "Reload Plugins".to_string(),
+            cmd: "reload_plugins".to_string(),
+            source: "System".to_string(),
+        });
+        
+        self.command_palette_candidates = candidates;
     }
 }
 
