@@ -121,6 +121,11 @@ fn render_modal(f: &mut Frame, state: &AppState) {
         return;
     }
 
+    if state.modal_mode == crate::app::ModalMode::CommandPalette {
+        render_command_palette(f, state, f.size());
+        return;
+    }
+
     let area = centered_rect(70, 60, f.size());
     let screen = f.size();
 
@@ -1530,6 +1535,11 @@ static HELP_ITEMS: &[HelpItem] = &[
         context: "Search",
     },
     HelpItem {
+        key: "Alt+p / :",
+        desc: "Open Command Palette Overlay",
+        context: "Search",
+    },
+    HelpItem {
         key: "Esc",
         desc: "Close current overlay / modal",
         context: "Modals",
@@ -1807,6 +1817,136 @@ fn render_search_modal(f: &mut Frame, state: &AppState, area: Rect) {
         f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
     }
 }
+
+fn render_command_palette(f: &mut Frame, state: &AppState, area: Rect) {
+    let modal_area = centered_rect(70, 50, area);
+    f.render_widget(Clear, modal_area);
+
+    let footer = Line::from(vec![
+        Span::styled(" [j/k] ", Style::default().fg(Color::Cyan).bold()),
+        Span::raw("navigate │"),
+        Span::styled(" [Enter] ", Style::default().fg(Color::Green).bold()),
+        Span::raw("execute │"),
+        Span::styled(" [Esc] ", Style::default().fg(Color::Red).bold()),
+        Span::raw("close"),
+    ]);
+
+    let border_color = Color::Rgb(160, 32, 240); // vibrant purple
+
+    let block = Block::default()
+        .title(Line::from(vec![
+            Span::styled(" 󰍉 ", Style::default().fg(Color::Magenta).bold()),
+            Span::styled(" Command Palette ", Style::default().fg(Color::White).bold()),
+        ]))
+        .title_bottom(footer)
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .style(Style::default().bg(Color::Rgb(25, 25, 30)));
+
+    let inner_area = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let chunks = Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(inner_area);
+
+    // Prompt input
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(" Search Commands ");
+    let input_para = Paragraph::new(state.command_palette_input.as_str())
+        .block(input_block)
+        .style(Style::default().fg(Color::White));
+    f.render_widget(input_para, chunks[0]);
+
+    if state.command_palette_focused {
+        f.set_cursor(
+            chunks[0].x + 1 + state.command_palette_cursor_index as u16,
+            chunks[0].y + 1,
+        );
+    }
+
+    // Results list
+    let total_results = state.command_palette_results.len();
+    let list_height = (chunks[1].height as usize).saturating_sub(1);
+
+    let start_idx = if total_results <= list_height {
+        0
+    } else {
+        let half = list_height / 2;
+        let cursor = state.command_palette_selected_index;
+        if cursor < half {
+            0
+        } else if cursor >= total_results - half {
+            total_results - list_height
+        } else {
+            cursor - half
+        }
+    };
+
+    let end_idx = total_results.min(start_idx + list_height);
+    let window = &state.command_palette_results[start_idx..end_idx];
+
+    let list_items: Vec<ListItem> = window
+        .iter()
+        .enumerate()
+        .map(|(i, result)| {
+            let actual_idx = start_idx + i;
+            let is_selected = actual_idx == state.command_palette_selected_index;
+
+            let text_style = if is_selected {
+                Style::default().fg(Color::Black).bg(Color::Magenta).bold()
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            let source_style = if is_selected {
+                Style::default().fg(Color::Rgb(50, 50, 50)).bold()
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("[{}] ", result.source), source_style),
+                Span::styled(result.name.clone(), text_style),
+                Span::raw(" - "),
+                Span::styled(result.cmd.clone(), Style::default().fg(Color::Gray)),
+            ]))
+        })
+        .collect();
+
+    let list_block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(format!(" Actions ({}) ", total_results));
+
+    let list = List::new(list_items).block(list_block);
+    f.render_widget(list, chunks[1]);
+
+    // Draw scrollbar
+    if total_results > list_height {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_symbol(Some("░"))
+            .thumb_symbol("█");
+
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(total_results)
+            .position(state.command_palette_selected_index);
+
+        let scrollbar_area = chunks[1].inner(&Margin {
+            vertical: 1,
+            horizontal: 0,
+        });
+
+        f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+    }
+}
+
 
 // --------------------------------------------------------------------------
 // [SECTION] Tests
