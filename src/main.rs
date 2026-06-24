@@ -746,6 +746,13 @@ fn event_loop(
                             }
                             _ => {}
                         }
+                    } else if state.modal_mode == ascope::app::ModalMode::SizeDetails {
+                        match key.code {
+                            KeyCode::Esc => {
+                                state.close_size_details_popup();
+                            }
+                            _ => {}
+                        }
                     } else if state.modal_mode == ascope::app::ModalMode::OpenConfirmation {
                         match key.code {
                             KeyCode::Esc => {
@@ -924,6 +931,11 @@ fn event_loop(
                         KeyCode::Char('q') | KeyCode::Esc => break,
                         KeyCode::Char('/') => state.toggle_search_mode(),
                         KeyCode::Down | KeyCode::Char('j') => state.move_selection(1),
+                        KeyCode::Char('k')
+                            if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                        {
+                            state.trigger_size_details_popup();
+                        }
                         KeyCode::Up | KeyCode::Char('k') => state.move_selection(-1),
                         KeyCode::Enter => {
                             if let Some(target) = state.selected_item() {

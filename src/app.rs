@@ -37,6 +37,7 @@ pub enum ModalMode {
     DeleteConfirmation,
     SearchOverlay,
     CommandPalette,
+    SizeDetails,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +169,9 @@ pub struct AppState {
     pub command_palette_selected_index: usize,
     pub command_palette_cursor_index: usize,
     pub command_palette_focused: bool,
+    pub size_popup_path: Option<PathBuf>,
+    pub size_popup_stats: Option<Arc<Mutex<PathStats>>>,
+    pub size_popup_progress: Option<Arc<Mutex<ScanProgress>>>,
 }
 
 // --------------------------------------------------------------------------
@@ -428,6 +432,9 @@ impl AppState {
             command_palette_selected_index: 0,
             command_palette_cursor_index: 0,
             command_palette_focused: true,
+            size_popup_path: None,
+            size_popup_stats: None,
+            size_popup_progress: None,
         };
 
         // Discovered project commands
@@ -717,6 +724,34 @@ impl AppState {
         self.sync_navigation_items();
         self.reset_selection_timeout();
     }
+
+    /// Trigger the size details popup for the currently selected directory.
+    pub fn trigger_size_details_popup(&mut self) {
+        if let Some(entry) = self.selected_item() {
+            if entry.entry_type == EntryType::Directory {
+                let path = entry.path.clone();
+                self.modal_mode = ModalMode::SizeDetails;
+                self.size_popup_path = Some(path.clone());
+
+                let stats = Arc::new(Mutex::new(PathStats::default()));
+                let progress = Arc::new(Mutex::new(ScanProgress::Idle));
+
+                self.size_popup_stats = Some(stats.clone());
+                self.size_popup_progress = Some(progress.clone());
+
+                crate::fs::walker::scan_path_async(path, stats, progress);
+            }
+        }
+    }
+
+    /// Close the size details popup and clear the popup state.
+    pub fn close_size_details_popup(&mut self) {
+        self.modal_mode = ModalMode::None;
+        self.size_popup_path = None;
+        self.size_popup_stats = None;
+        self.size_popup_progress = None;
+    }
+
 
     fn get_children(&self, parent_path: &std::path::Path) -> Vec<DirEntry> {
         let mut children: Vec<DirEntry> = self
