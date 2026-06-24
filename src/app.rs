@@ -181,7 +181,7 @@ pub struct FolderDashboardSummary {
     pub file_count: usize,
     pub dir_count: usize,
     pub total_immediate_size: u64,
-    pub top_files: Vec<(String, u64)>, // Name and size
+    pub top_files: Vec<(String, u64)>,          // Name and size
     pub extension_counts: Vec<(String, usize)>, // Extension and count
 }
 
@@ -191,42 +191,41 @@ impl FolderDashboardSummary {
         let mut dir_count = 0;
         let mut total_immediate_size = 0;
         let mut files = Vec::new();
-        let mut ext_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut ext_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
 
         if let Ok(read_dir) = std::fs::read_dir(path) {
-            for entry in read_dir {
-                if let Ok(entry) = entry {
-                    let file_type = entry.file_type();
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if let Ok(ft) = file_type {
-                        if ft.is_dir() {
-                            dir_count += 1;
-                        } else if ft.is_file() {
-                            file_count += 1;
-                            let metadata = entry.metadata();
-                            let size = metadata.map(|m| m.len()).unwrap_or(0);
-                            total_immediate_size += size;
-                            files.push((name.clone(), size));
+            for entry in read_dir.flatten() {
+                let file_type = entry.file_type();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if let Ok(ft) = file_type {
+                    if ft.is_dir() {
+                        dir_count += 1;
+                    } else if ft.is_file() {
+                        file_count += 1;
+                        let metadata = entry.metadata();
+                        let size = metadata.map(|m| m.len()).unwrap_or(0);
+                        total_immediate_size += size;
+                        files.push((name.clone(), size));
 
-                            // Get extension
-                            let ext = std::path::Path::new(&name)
-                                .extension()
-                                .map(|e| e.to_string_lossy().to_string().to_lowercase())
-                                .unwrap_or_else(|| "no ext".to_string());
-                            *ext_counts.entry(ext).or_insert(0) += 1;
-                        }
+                        // Get extension
+                        let ext = std::path::Path::new(&name)
+                            .extension()
+                            .map(|e| e.to_string_lossy().to_string().to_lowercase())
+                            .unwrap_or_else(|| "no ext".to_string());
+                        *ext_counts.entry(ext).or_insert(0) += 1;
                     }
                 }
             }
         }
 
         // Sort files by size descending, keep top 5
-        files.sort_by(|a, b| b.1.cmp(&a.1));
+        files.sort_by_key(|x| std::cmp::Reverse(x.1));
         files.truncate(5);
 
         // Sort extension counts by frequency descending
         let mut extension_counts: Vec<(String, usize)> = ext_counts.into_iter().collect();
-        extension_counts.sort_by(|a, b| b.1.cmp(&a.1));
+        extension_counts.sort_by_key(|x| std::cmp::Reverse(x.1));
 
         Self {
             path: path.to_path_buf(),
@@ -520,7 +519,7 @@ impl AppState {
             cmd: "reload_plugins".to_string(),
             source: "System".to_string(),
         });
-        
+
         state.command_palette_candidates = candidates.clone();
         state.command_palette_results = candidates;
 
@@ -775,10 +774,13 @@ impl AppState {
             if entry.entry_type == EntryType::Directory {
                 let path = entry.path.clone();
                 self.navigation.toggle_expand_selected();
-                
+
                 // If it is now expanded, ensure its immediate children are loaded dynamically
                 if self.navigation.is_expanded(&path) {
-                    let has_children = self.all_entries.iter().any(|e| e.path.parent() == Some(&path));
+                    let has_children = self
+                        .all_entries
+                        .iter()
+                        .any(|e| e.path.parent() == Some(&path));
                     if !has_children {
                         if let Ok(children) = scan_immediate(&path) {
                             self.all_entries.extend(children);
@@ -839,7 +841,6 @@ impl AppState {
         *self.right_pane_dashboard_cache.borrow_mut() = Some((path.to_path_buf(), summary.clone()));
         summary
     }
-
 
     fn get_children(&self, parent_path: &std::path::Path) -> Vec<DirEntry> {
         let mut children: Vec<DirEntry> = self
@@ -1690,7 +1691,7 @@ impl AppState {
             cmd: "reload_plugins".to_string(),
             source: "System".to_string(),
         });
-        
+
         self.command_palette_candidates = candidates;
     }
 }

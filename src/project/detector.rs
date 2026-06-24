@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DetectedCommand {
@@ -78,12 +78,14 @@ pub fn detect_project_commands(path: &Path) -> Vec<DetectedCommand> {
                 let line = line.trim();
                 if let Some(colon_idx) = line.find(':') {
                     let target_part = line[..colon_idx].trim();
-                    if !target_part.is_empty() 
-                        && !target_part.starts_with('.') 
-                        && !target_part.contains('=') 
-                        && !target_part.contains('$') 
-                        && target_part.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-                        && target_part != "PHONY" 
+                    if !target_part.is_empty()
+                        && !target_part.starts_with('.')
+                        && !target_part.contains('=')
+                        && !target_part.contains('$')
+                        && target_part
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+                        && target_part != "PHONY"
                     {
                         commands.push(DetectedCommand {
                             name: format!("make {}", target_part),
@@ -121,10 +123,10 @@ pub fn detect_project_commands(path: &Path) -> Vec<DetectedCommand> {
     }
 
     // 5. Python
-    if path.join("requirements.txt").exists() 
-        || path.join("pyproject.toml").exists() 
-        || path.join("setup.py").exists() 
-        || path.join("Pipfile").exists() 
+    if path.join("requirements.txt").exists()
+        || path.join("pyproject.toml").exists()
+        || path.join("setup.py").exists()
+        || path.join("Pipfile").exists()
     {
         commands.push(DetectedCommand {
             name: "python3 main.py".to_string(),
@@ -180,7 +182,11 @@ pub fn detect_project_commands(path: &Path) -> Vec<DetectedCommand> {
         });
     }
     if path.join("build.gradle").exists() || path.join("build.gradle.kts").exists() {
-        let gradlew = if path.join("gradlew").exists() { "./gradlew" } else { "gradle" };
+        let gradlew = if path.join("gradlew").exists() {
+            "./gradlew"
+        } else {
+            "gradle"
+        };
         commands.push(DetectedCommand {
             name: format!("{} build", gradlew),
             cmd: format!("{} build", gradlew),

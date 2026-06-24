@@ -174,32 +174,44 @@ fn event_loop(
                                     state.command_palette_cursor_index = 0;
                                     state.command_palette_focused = true;
                                 }
-                                KeyCode::Up | KeyCode::Char('p') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                                KeyCode::Up | KeyCode::Char('p')
+                                    if key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                                {
                                     state.command_palette_focused = false;
                                     let len = state.command_palette_results.len();
                                     if len > 0 {
-                                        state.command_palette_selected_index = (state.command_palette_selected_index + len - 1) % len;
+                                        state.command_palette_selected_index =
+                                            (state.command_palette_selected_index + len - 1) % len;
                                     }
                                 }
-                                KeyCode::Down | KeyCode::Char('n') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                                KeyCode::Down | KeyCode::Char('n')
+                                    if key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                                {
                                     state.command_palette_focused = false;
                                     let len = state.command_palette_results.len();
                                     if len > 0 {
-                                        state.command_palette_selected_index = (state.command_palette_selected_index + 1) % len;
+                                        state.command_palette_selected_index =
+                                            (state.command_palette_selected_index + 1) % len;
                                     }
                                 }
                                 KeyCode::Up => {
                                     state.command_palette_focused = false;
                                     let len = state.command_palette_results.len();
                                     if len > 0 {
-                                        state.command_palette_selected_index = (state.command_palette_selected_index + len - 1) % len;
+                                        state.command_palette_selected_index =
+                                            (state.command_palette_selected_index + len - 1) % len;
                                     }
                                 }
                                 KeyCode::Down => {
                                     state.command_palette_focused = false;
                                     let len = state.command_palette_results.len();
                                     if len > 0 {
-                                        state.command_palette_selected_index = (state.command_palette_selected_index + 1) % len;
+                                        state.command_palette_selected_index =
+                                            (state.command_palette_selected_index + 1) % len;
                                     }
                                 }
                                 KeyCode::Left => {
@@ -208,14 +220,18 @@ fn event_loop(
                                     }
                                 }
                                 KeyCode::Right => {
-                                    if state.command_palette_cursor_index < state.command_palette_input.chars().count() {
+                                    if state.command_palette_cursor_index
+                                        < state.command_palette_input.chars().count()
+                                    {
                                         state.command_palette_cursor_index += 1;
                                     }
                                 }
                                 KeyCode::Backspace => {
                                     if state.command_palette_cursor_index > 0 {
                                         let char_idx = state.command_palette_cursor_index - 1;
-                                        if let Some((byte_idx, _)) = state.command_palette_input.char_indices().nth(char_idx) {
+                                        if let Some((byte_idx, _)) =
+                                            state.command_palette_input.char_indices().nth(char_idx)
+                                        {
                                             state.command_palette_input.remove(byte_idx);
                                             state.command_palette_cursor_index -= 1;
                                             state.update_command_palette_results();
@@ -223,23 +239,43 @@ fn event_loop(
                                     }
                                 }
                                 KeyCode::Delete => {
-                                    if state.command_palette_cursor_index < state.command_palette_input.chars().count() {
+                                    if state.command_palette_cursor_index
+                                        < state.command_palette_input.chars().count()
+                                    {
                                         let char_idx = state.command_palette_cursor_index;
-                                        if let Some((byte_idx, _)) = state.command_palette_input.char_indices().nth(char_idx) {
+                                        if let Some((byte_idx, _)) =
+                                            state.command_palette_input.char_indices().nth(char_idx)
+                                        {
                                             state.command_palette_input.remove(byte_idx);
                                             state.update_command_palette_results();
                                         }
                                     }
                                 }
-                                KeyCode::Char(c) if !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
+                                KeyCode::Char(c)
+                                    if !key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL)
+                                        && !key
+                                            .modifiers
+                                            .contains(crossterm::event::KeyModifiers::ALT) =>
+                                {
                                     let char_idx = state.command_palette_cursor_index;
-                                    let byte_idx = state.command_palette_input.char_indices().nth(char_idx).map(|(i, _)| i).unwrap_or(state.command_palette_input.len());
+                                    let byte_idx = state
+                                        .command_palette_input
+                                        .char_indices()
+                                        .nth(char_idx)
+                                        .map(|(i, _)| i)
+                                        .unwrap_or(state.command_palette_input.len());
                                     state.command_palette_input.insert(byte_idx, c);
                                     state.command_palette_cursor_index += 1;
                                     state.update_command_palette_results();
                                 }
                                 KeyCode::Enter => {
-                                    if let Some(target) = state.command_palette_results.get(state.command_palette_selected_index).cloned() {
+                                    if let Some(target) = state
+                                        .command_palette_results
+                                        .get(state.command_palette_selected_index)
+                                        .cloned()
+                                    {
                                         if !target.cmd.is_empty() {
                                             state.modal_mode = ascope::app::ModalMode::None;
                                             state.command_palette_input.clear();
@@ -311,14 +347,17 @@ fn event_loop(
                                     } else {
                                         let len = state.command_palette_results.len();
                                         if len > 0 {
-                                            state.command_palette_selected_index = (state.command_palette_selected_index + len - 1) % len;
+                                            state.command_palette_selected_index =
+                                                (state.command_palette_selected_index + len - 1)
+                                                    % len;
                                         }
                                     }
                                 }
                                 KeyCode::Down | KeyCode::Char('j') => {
                                     let len = state.command_palette_results.len();
                                     if len > 0 {
-                                        state.command_palette_selected_index = (state.command_palette_selected_index + 1) % len;
+                                        state.command_palette_selected_index =
+                                            (state.command_palette_selected_index + 1) % len;
                                     }
                                 }
                                 KeyCode::Char('i') | KeyCode::Char('a') | KeyCode::Insert => {
@@ -351,7 +390,11 @@ fn event_loop(
                                     state.update_command_palette_results();
                                 }
                                 KeyCode::Enter => {
-                                    if let Some(target) = state.command_palette_results.get(state.command_palette_selected_index).cloned() {
+                                    if let Some(target) = state
+                                        .command_palette_results
+                                        .get(state.command_palette_selected_index)
+                                        .cloned()
+                                    {
                                         if !target.cmd.is_empty() {
                                             state.modal_mode = ascope::app::ModalMode::None;
                                             state.command_palette_input.clear();
@@ -747,11 +790,8 @@ fn event_loop(
                             _ => {}
                         }
                     } else if state.modal_mode == ascope::app::ModalMode::SizeDetails {
-                        match key.code {
-                            KeyCode::Esc => {
-                                state.close_size_details_popup();
-                            }
-                            _ => {}
+                        if key.code == KeyCode::Esc {
+                            state.close_size_details_popup();
                         }
                     } else if state.modal_mode == ascope::app::ModalMode::OpenConfirmation {
                         match key.code {
@@ -932,7 +972,9 @@ fn event_loop(
                         KeyCode::Char('/') => state.toggle_search_mode(),
                         KeyCode::Down | KeyCode::Char('j') => state.move_selection(1),
                         KeyCode::Char('k')
-                            if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                            if key
+                                .modifiers
+                                .contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
                             state.trigger_size_details_popup();
                         }

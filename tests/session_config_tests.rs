@@ -1,7 +1,7 @@
 use ascope::config::session::parse_session_config;
-use tempfile::tempdir;
 use std::fs::File;
 use std::io::Write;
+use tempfile::tempdir;
 
 #[test]
 fn test_parse_session_config() {

@@ -5,7 +5,7 @@ use tempfile::tempdir;
 fn test_command_palette_fuzzy_matching() {
     let dir = tempdir().unwrap();
     let mut state = AppState::new(dir.path().to_path_buf());
-    
+
     state.command_palette_candidates = vec![
         ascope::project::detector::DetectedCommand {
             name: "npm run dev".to_string(),
@@ -20,7 +20,7 @@ fn test_command_palette_fuzzy_matching() {
     ];
     state.command_palette_input = "npm".to_string();
     state.update_command_palette_results();
-    
+
     assert_eq!(state.command_palette_results.len(), 1);
     assert_eq!(state.command_palette_results[0].name, "npm run dev");
 }
@@ -29,14 +29,14 @@ fn test_command_palette_fuzzy_matching() {
 fn test_command_palette_custom_shell_command() {
     let dir = tempdir().unwrap();
     let mut state = AppState::new(dir.path().to_path_buf());
-    
+
     state.command_palette_input = "!echo hello".to_string();
     state.update_command_palette_results();
-    
+
     assert_eq!(state.command_palette_results.len(), 1);
     assert_eq!(state.command_palette_results[0].cmd, "echo hello");
     assert_eq!(state.command_palette_results[0].source, "Shell");
-    
+
     // Empty custom command
     state.command_palette_input = "!".to_string();
     state.update_command_palette_results();

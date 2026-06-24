@@ -1,7 +1,7 @@
 use ascope::project::detector::detect_project_commands;
-use tempfile::tempdir;
 use std::fs::File;
 use std::io::Write;
+use tempfile::tempdir;
 
 #[test]
 fn test_detect_cargo_commands() {
@@ -17,7 +17,11 @@ fn test_detect_cargo_commands() {
 fn test_detect_npm_scripts() {
     let dir = tempdir().unwrap();
     let mut pkg = File::create(dir.path().join("package.json")).unwrap();
-    write!(pkg, r#"{{"scripts": {{"start": "node index.js", "test": "jest"}}}}"#).unwrap();
+    write!(
+        pkg,
+        r#"{{"scripts": {{"start": "node index.js", "test": "jest"}}}}"#
+    )
+    .unwrap();
     let cmds = detect_project_commands(dir.path());
     assert!(cmds.iter().any(|c| c.name == "npm run start"));
     assert!(cmds.iter().any(|c| c.name == "npm run test"));
@@ -62,7 +66,9 @@ fn test_detect_python_commands() {
     File::create(dir.path().join("requirements.txt")).unwrap();
     let cmds = detect_project_commands(dir.path());
     assert!(cmds.iter().any(|c| c.name == "python3 main.py"));
-    assert!(cmds.iter().any(|c| c.name == "pip install -r requirements.txt"));
+    assert!(cmds
+        .iter()
+        .any(|c| c.name == "pip install -r requirements.txt"));
 }
 
 #[test]

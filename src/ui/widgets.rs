@@ -124,10 +124,16 @@ fn render_size_details_popup(f: &mut Frame, state: &AppState) {
     let border_color = Color::Rgb(150, 100, 220); // Aura purple
     let title_line = Line::from(vec![
         Span::styled(" 󰉋 ", Style::default().fg(border_color).bold()),
-        Span::styled(" Deep Directory Storage Analysis ", Style::default().fg(Color::LightCyan).bold()),
+        Span::styled(
+            " Deep Directory Storage Analysis ",
+            Style::default().fg(Color::LightCyan).bold(),
+        ),
     ]);
     let footer_line = Line::from(vec![
-        Span::styled(" [Esc] ", Style::default().fg(Color::Rgb(0, 180, 216)).bold()),
+        Span::styled(
+            " [Esc] ",
+            Style::default().fg(Color::Rgb(0, 180, 216)).bold(),
+        ),
         Span::styled("close popup ", Style::default().fg(Color::Gray)),
     ]);
 
@@ -143,7 +149,9 @@ fn render_size_details_popup(f: &mut Frame, state: &AppState) {
     f.render_widget(block, area);
 
     // Get scan progress
-    let progress = state.size_popup_progress.as_ref()
+    let progress = state
+        .size_popup_progress
+        .as_ref()
         .and_then(|p| p.lock().ok())
         .map(|p| p.clone())
         .unwrap_or(crate::fs::walker::ScanProgress::Idle);
@@ -171,7 +179,7 @@ fn render_size_details_popup(f: &mut Frame, state: &AppState) {
             let paragraph = Paragraph::new(text)
                 .style(Style::default().fg(Color::LightYellow))
                 .alignment(Alignment::Center);
-            
+
             // Centered vertically
             let center_layout = Layout::default()
                 .direction(Direction::Vertical)
@@ -187,13 +195,13 @@ fn render_size_details_popup(f: &mut Frame, state: &AppState) {
         crate::fs::walker::ScanProgress::Complete => {
             if let Some(stats_lock) = &state.size_popup_stats {
                 if let Ok(stats) = stats_lock.lock() {
-                    let path_str = state.size_popup_path.as_ref()
+                    let path_str = state
+                        .size_popup_path
+                        .as_ref()
                         .map(|p| p.to_string_lossy().to_string())
                         .unwrap_or_default();
 
-                    let latest_mtime = stats.all_entries.iter()
-                        .map(|e| e.mtime)
-                        .max();
+                    let latest_mtime = stats.all_entries.iter().map(|e| e.mtime).max();
                     let latest_mtime_str = latest_mtime
                         .map(format_system_time)
                         .unwrap_or_else(|| "N/A".to_string());
@@ -217,15 +225,23 @@ fn render_size_details_popup(f: &mut Frame, state: &AppState) {
                         ]),
                         Line::from(vec![
                             Span::styled(" Size: ", Style::default().fg(Color::Gray)),
-                            Span::styled(total_size_str, Style::default().fg(Color::LightGreen).bold()),
+                            Span::styled(
+                                total_size_str,
+                                Style::default().fg(Color::LightGreen).bold(),
+                            ),
                             Span::styled(" │ Files: ", Style::default().fg(Color::Gray)),
-                            Span::styled(stats.file_count.to_string(), Style::default().fg(Color::LightBlue).bold()),
+                            Span::styled(
+                                stats.file_count.to_string(),
+                                Style::default().fg(Color::LightBlue).bold(),
+                            ),
                             Span::styled(" │ Latest Access: ", Style::default().fg(Color::Gray)),
-                            Span::styled(latest_mtime_str, Style::default().fg(Color::LightYellow).bold()),
+                            Span::styled(
+                                latest_mtime_str,
+                                Style::default().fg(Color::LightYellow).bold(),
+                            ),
                         ]),
                     ];
-                    let overview_para = Paragraph::new(overview_text)
-                        .style(Style::default());
+                    let overview_para = Paragraph::new(overview_text).style(Style::default());
                     f.render_widget(overview_para, chunks[0]);
 
                     // Divider
@@ -235,20 +251,36 @@ fn render_size_details_popup(f: &mut Frame, state: &AppState) {
 
                     // 2. Render Subdirectory Breakdown Table
                     // Sort subdirectories by size descending
-                    let mut subdirs: Vec<(&std::path::PathBuf, &u64)> = stats.subdirs.iter().collect();
+                    let mut subdirs: Vec<(&std::path::PathBuf, &u64)> =
+                        stats.subdirs.iter().collect();
                     subdirs.sort_by(|a, b| b.1.cmp(a.1));
 
                     let header = ratatui::widgets::Row::new(vec![
-                        ratatui::widgets::Cell::from(Span::styled("Subdirectory", Style::default().fg(Color::LightCyan).bold())),
-                        ratatui::widgets::Cell::from(Span::styled("Size", Style::default().fg(Color::LightCyan).bold())),
-                        ratatui::widgets::Cell::from(Span::styled("Share", Style::default().fg(Color::LightCyan).bold())),
+                        ratatui::widgets::Cell::from(Span::styled(
+                            "Subdirectory",
+                            Style::default().fg(Color::LightCyan).bold(),
+                        )),
+                        ratatui::widgets::Cell::from(Span::styled(
+                            "Size",
+                            Style::default().fg(Color::LightCyan).bold(),
+                        )),
+                        ratatui::widgets::Cell::from(Span::styled(
+                            "Share",
+                            Style::default().fg(Color::LightCyan).bold(),
+                        )),
                     ])
                     .bottom_margin(1);
 
-                    let total_size = if stats.total_size > 0 { stats.total_size as f64 } else { 1.0 };
-                    let rows: Vec<ratatui::widgets::Row> = subdirs.iter()
+                    let total_size = if stats.total_size > 0 {
+                        stats.total_size as f64
+                    } else {
+                        1.0
+                    };
+                    let rows: Vec<ratatui::widgets::Row> = subdirs
+                        .iter()
                         .map(|(path, size)| {
-                            let rel_path = path.file_name()
+                            let rel_path = path
+                                .file_name()
                                 .map(|n| n.to_string_lossy().to_string())
                                 .unwrap_or_else(|| path.to_string_lossy().to_string());
                             let size_str = crate::fs::walker::format_size(**size);
@@ -257,12 +289,22 @@ fn render_size_details_popup(f: &mut Frame, state: &AppState) {
 
                             // Draw a small visual bar representing percentage
                             let bar_chars = ((percent / 10.0).round() as usize).min(10);
-                            let bar = format!("{}{}", "█".repeat(bar_chars), "░".repeat(10 - bar_chars));
+                            let bar =
+                                format!("{}{}", "█".repeat(bar_chars), "░".repeat(10 - bar_chars));
 
                             ratatui::widgets::Row::new(vec![
-                                ratatui::widgets::Cell::from(Span::styled(rel_path, Style::default().fg(Color::White))),
-                                ratatui::widgets::Cell::from(Span::styled(size_str, Style::default().fg(Color::LightGreen))),
-                                ratatui::widgets::Cell::from(Span::styled(format!("{} {}", bar, percent_str), Style::default().fg(Color::LightBlue))),
+                                ratatui::widgets::Cell::from(Span::styled(
+                                    rel_path,
+                                    Style::default().fg(Color::White),
+                                )),
+                                ratatui::widgets::Cell::from(Span::styled(
+                                    size_str,
+                                    Style::default().fg(Color::LightGreen),
+                                )),
+                                ratatui::widgets::Cell::from(Span::styled(
+                                    format!("{} {}", bar, percent_str),
+                                    Style::default().fg(Color::LightBlue),
+                                )),
                             ])
                         })
                         .collect();
@@ -787,7 +829,8 @@ fn render_directory_dashboard(f: &mut Frame, state: &AppState, area: Rect, path:
         .split(inner_area);
 
     // Header
-    let folder_name = path.file_name()
+    let folder_name = path
+        .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.to_string_lossy().to_string());
     let header_text = vec![
@@ -795,9 +838,10 @@ fn render_directory_dashboard(f: &mut Frame, state: &AppState, area: Rect, path:
             Span::styled(" 󰉋  ", Style::default().fg(Color::Yellow).bold()),
             Span::styled(folder_name, Style::default().fg(Color::White).bold()),
         ]),
-        Line::from(vec![
-            Span::styled(format!("  Path: {}", path.to_string_lossy()), Style::default().fg(Color::DarkGray)),
-        ]),
+        Line::from(vec![Span::styled(
+            format!("  Path: {}", path.to_string_lossy()),
+            Style::default().fg(Color::DarkGray),
+        )]),
     ];
     f.render_widget(Paragraph::new(header_text), chunks[0]);
 
@@ -806,51 +850,81 @@ fn render_directory_dashboard(f: &mut Frame, state: &AppState, area: Rect, path:
     let summary_text = vec![
         Line::from(vec![
             Span::styled("  Immediate Files : ", Style::default().fg(Color::Gray)),
-            Span::styled(summary.file_count.to_string(), Style::default().fg(Color::LightBlue).bold()),
+            Span::styled(
+                summary.file_count.to_string(),
+                Style::default().fg(Color::LightBlue).bold(),
+            ),
         ]),
         Line::from(vec![
             Span::styled("  Subdirectories  : ", Style::default().fg(Color::Gray)),
-            Span::styled(summary.dir_count.to_string(), Style::default().fg(Color::LightMagenta).bold()),
+            Span::styled(
+                summary.dir_count.to_string(),
+                Style::default().fg(Color::LightMagenta).bold(),
+            ),
         ]),
         Line::from(vec![
             Span::styled("  Immediate Size  : ", Style::default().fg(Color::Gray)),
-            Span::styled(total_size_str, Style::default().fg(Color::LightGreen).bold()),
+            Span::styled(
+                total_size_str,
+                Style::default().fg(Color::LightGreen).bold(),
+            ),
         ]),
     ];
     f.render_widget(Paragraph::new(summary_text), chunks[1]);
 
     // Top Files list
-    let mut top_files_items = vec![
-        Line::from(Span::styled("  󰈚  Top Files by Size:", Style::default().fg(Color::LightCyan).bold())),
-    ];
+    let mut top_files_items = vec![Line::from(Span::styled(
+        "  󰈚  Top Files by Size:",
+        Style::default().fg(Color::LightCyan).bold(),
+    ))];
     if summary.top_files.is_empty() {
-        top_files_items.push(Line::from(Span::styled("    (No files in this folder)", Style::default().fg(Color::DarkGray))));
+        top_files_items.push(Line::from(Span::styled(
+            "    (No files in this folder)",
+            Style::default().fg(Color::DarkGray),
+        )));
     } else {
         for (name, size) in &summary.top_files {
             let size_str = crate::fs::walker::format_size(*size);
             top_files_items.push(Line::from(vec![
                 Span::styled("    • ", Style::default().fg(Color::DarkGray)),
                 Span::styled(name.clone(), Style::default().fg(Color::White)),
-                Span::styled(format!(" ({})", size_str), Style::default().fg(Color::LightGreen)),
+                Span::styled(
+                    format!(" ({})", size_str),
+                    Style::default().fg(Color::LightGreen),
+                ),
             ]));
         }
     }
     f.render_widget(Paragraph::new(top_files_items), chunks[2]);
 
     // File Types Breakdown (Extensions list)
-    let mut ext_items = vec![
-        Line::from(Span::styled("  󰬛  File Type Distribution:", Style::default().fg(Color::LightCyan).bold())),
-    ];
+    let mut ext_items = vec![Line::from(Span::styled(
+        "  󰬛  File Type Distribution:",
+        Style::default().fg(Color::LightCyan).bold(),
+    ))];
     if summary.extension_counts.is_empty() {
-        ext_items.push(Line::from(Span::styled("    (No file types discovered)", Style::default().fg(Color::DarkGray))));
+        ext_items.push(Line::from(Span::styled(
+            "    (No file types discovered)",
+            Style::default().fg(Color::DarkGray),
+        )));
     } else {
         // Draw up to 5 extension breakdowns
         for (ext, count) in summary.extension_counts.iter().take(5) {
-            let ext_label = if ext.is_empty() { "no extension" } else { ext.as_str() };
+            let ext_label = if ext.is_empty() {
+                "no extension"
+            } else {
+                ext.as_str()
+            };
             ext_items.push(Line::from(vec![
                 Span::styled("    • ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{:<15}", ext_label), Style::default().fg(Color::LightBlue)),
-                Span::styled(format!(": {} files", count), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{:<15}", ext_label),
+                    Style::default().fg(Color::LightBlue),
+                ),
+                Span::styled(
+                    format!(": {} files", count),
+                    Style::default().fg(Color::Gray),
+                ),
             ]));
         }
     }
@@ -862,7 +936,10 @@ fn render_directory_dashboard(f: &mut Frame, state: &AppState, area: Rect, path:
         Span::styled("Shift+K", Style::default().fg(Color::Yellow).bold()),
         Span::styled(" or ", Style::default().fg(Color::DarkGray)),
         Span::styled("Ctrl+k", Style::default().fg(Color::Yellow).bold()),
-        Span::styled(" for deep recursive storage analysis ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " for deep recursive storage analysis ",
+            Style::default().fg(Color::DarkGray),
+        ),
     ]);
     f.render_widget(Paragraph::new(footer_text), chunks[4]);
 }
@@ -2139,7 +2216,10 @@ fn render_command_palette(f: &mut Frame, state: &AppState, area: Rect) {
     let block = Block::default()
         .title(Line::from(vec![
             Span::styled(" 󰍉 ", Style::default().fg(Color::Magenta).bold()),
-            Span::styled(" Command Palette ", Style::default().fg(Color::White).bold()),
+            Span::styled(
+                " Command Palette ",
+                Style::default().fg(Color::White).bold(),
+            ),
         ]))
         .title_bottom(footer)
         .title_alignment(Alignment::Center)
@@ -2254,7 +2334,6 @@ fn render_command_palette(f: &mut Frame, state: &AppState, area: Rect) {
         f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
     }
 }
-
 
 // --------------------------------------------------------------------------
 // [SECTION] Tests
