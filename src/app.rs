@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use crate::fs::walker::{scan_immediate, scan_path_async, PathStats, ScanProgress};
+use crate::fs::walker::{scan_immediate, PathStats, ScanProgress};
 use crate::git::GitContext;
 use image::GenericImageView as _;
 use ratatui::text::Line;
@@ -185,13 +185,7 @@ impl AppState {
         Vec<DirEntry>,
     ) {
         let active_stats = Arc::new(Mutex::new(PathStats::default()));
-        let scan_progress = Arc::new(Mutex::new(ScanProgress::default()));
-
-        scan_path_async(
-            path.to_path_buf(),
-            Arc::clone(&active_stats),
-            Arc::clone(&scan_progress),
-        );
+        let scan_progress = Arc::new(Mutex::new(ScanProgress::Complete));
 
         let git_ctx = GitContext::read(path);
         let immediate_entries = scan_immediate(path).unwrap_or_default();
@@ -500,31 +494,33 @@ impl AppState {
             )
         {
             let stats = self.active_stats.lock().unwrap_or_else(|e| e.into_inner());
-            let new_items: Vec<DirEntry> = stats
-                .all_entries
-                .iter()
-                .filter(|entry| entry.path.parent() == Some(&self.current_path))
-                .cloned()
-                .collect();
-            self.all_entries = stats.all_entries.clone();
-            drop(stats);
+            if !stats.all_entries.is_empty() {
+                let new_items: Vec<DirEntry> = stats
+                    .all_entries
+                    .iter()
+                    .filter(|entry| entry.path.parent() == Some(&self.current_path))
+                    .cloned()
+                    .collect();
+                self.all_entries = stats.all_entries.clone();
+                drop(stats);
 
-            // Save currently selected item's path
-            let selected_path = self.navigation.current_selection().map(|e| e.path.clone());
+                // Save currently selected item's path
+                let selected_path = self.navigation.current_selection().map(|e| e.path.clone());
 
-            // Use Navigation to update items (handles sorting automatically)
-            self.navigation.update_items(new_items);
-            self.sync_navigation_items();
+                // Use Navigation to update items (handles sorting automatically)
+                self.navigation.update_items(new_items);
+                self.sync_navigation_items();
+
+                // Restore selection
+                if let Some(path) = selected_path {
+                    self.navigation.select_path(&path);
+                }
+
+                if let Some(query) = self.navigation.filter_query().map(String::from) {
+                    self.navigation.set_filter(Some(query), &self.all_entries);
+                }
+            }
             self.scan_applied = true;
-
-            // Restore selection
-            if let Some(path) = selected_path {
-                self.navigation.select_path(&path);
-            }
-
-            if let Some(query) = self.navigation.filter_query().map(String::from) {
-                self.navigation.set_filter(Some(query), &self.all_entries);
-            }
         }
     }
 
@@ -702,7 +698,22 @@ impl AppState {
 
     /// Toggle the expansion state of the currently selected directory.
     pub fn toggle_expand(&mut self) {
-        self.navigation.toggle_expand_selected();
+        if let Some(entry) = self.navigation.current_selection().cloned() {
+            if entry.entry_type == EntryType::Directory {
+                let path = entry.path.clone();
+                self.navigation.toggle_expand_selected();
+                
+                // If it is now expanded, ensure its immediate children are loaded dynamically
+                if self.navigation.is_expanded(&path) {
+                    let has_children = self.all_entries.iter().any(|e| e.path.parent() == Some(&path));
+                    if !has_children {
+                        if let Ok(children) = scan_immediate(&path) {
+                            self.all_entries.extend(children);
+                        }
+                    }
+                }
+            }
+        }
         self.sync_navigation_items();
         self.reset_selection_timeout();
     }
@@ -1682,6 +1693,8 @@ mod tests {
 
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
+        state.navigation.select_path(&src_dir);
+        state.toggle_expand();
 
         state
             .navigation
@@ -1707,6 +1720,8 @@ mod tests {
 
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
+        state.navigation.select_path(&src_dir);
+        state.toggle_expand();
         state
             .navigation
             .set_filter(Some(String::from("app")), &state.all_entries);
@@ -1747,6 +1762,8 @@ mod tests {
 
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
+        state.navigation.select_path(&src_dir);
+        state.toggle_expand();
         state
             .navigation
             .set_filter(Some(String::from("main.rs")), &state.all_entries);
