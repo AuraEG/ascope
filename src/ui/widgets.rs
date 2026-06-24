@@ -101,6 +101,189 @@ fn render_tab_bar(f: &mut Frame, state: &AppState, area: Rect) {
     f.render_widget(paragraph, area);
 }
 
+fn render_size_details_popup(f: &mut Frame, state: &AppState) {
+    let screen = f.size();
+    let area = centered_rect(75, 75, screen);
+
+    // 1. Draw Dropshadow
+    if area.width > 1 && area.height > 1 {
+        let shadow_area = Rect {
+            x: (area.x + 1).min(screen.width.saturating_sub(1)),
+            y: (area.y + 1).min(screen.height.saturating_sub(1)),
+            width: area.width.min(screen.width.saturating_sub(area.x + 1)),
+            height: area.height.min(screen.height.saturating_sub(area.y + 1)),
+        };
+        let shadow_block = Block::default().style(Style::default().bg(Color::Rgb(12, 12, 16)));
+        f.render_widget(shadow_block, shadow_area);
+    }
+
+    // 2. Clear underlying screen
+    f.render_widget(Clear, area);
+
+    // Border and Title block
+    let border_color = Color::Rgb(150, 100, 220); // Aura purple
+    let title_line = Line::from(vec![
+        Span::styled(" 󰉋 ", Style::default().fg(border_color).bold()),
+        Span::styled(" Deep Directory Storage Analysis ", Style::default().fg(Color::LightCyan).bold()),
+    ]);
+    let footer_line = Line::from(vec![
+        Span::styled(" [Esc] ", Style::default().fg(Color::Rgb(0, 180, 216)).bold()),
+        Span::styled("close popup ", Style::default().fg(Color::Gray)),
+    ]);
+
+    let block = Block::default()
+        .title(title_line)
+        .title_alignment(Alignment::Center)
+        .title_bottom(footer_line)
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
+
+    let inner_area = block.inner(area);
+    f.render_widget(block, area);
+
+    // Get scan progress
+    let progress = state.size_popup_progress.as_ref()
+        .and_then(|p| p.lock().ok())
+        .map(|p| p.clone())
+        .unwrap_or(crate::fs::walker::ScanProgress::Idle);
+
+    match progress {
+        crate::fs::walker::ScanProgress::Idle | crate::fs::walker::ScanProgress::Scanning => {
+            // Draw loading animation/spinner
+            let spinner = match std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() / 150 % 8)
+                .unwrap_or(0)
+            {
+                0 => "⠋",
+                1 => "⠙",
+                2 => "⠹",
+                3 => "⠸",
+                4 => "⠼",
+                5 => "⠴",
+                6 => "⠦",
+                7 => "⠧",
+                _ => "⠋",
+            };
+
+            let text = format!(" {} Analyzing storage size, file count, and access history...\n Please wait for deep scan to finish.", spinner);
+            let paragraph = Paragraph::new(text)
+                .style(Style::default().fg(Color::LightYellow))
+                .alignment(Alignment::Center);
+            
+            // Centered vertically
+            let center_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(40),
+                    Constraint::Percentage(20),
+                    Constraint::Percentage(40),
+                ])
+                .split(inner_area);
+
+            f.render_widget(paragraph, center_layout[1]);
+        }
+        crate::fs::walker::ScanProgress::Complete => {
+            if let Some(stats_lock) = &state.size_popup_stats {
+                if let Ok(stats) = stats_lock.lock() {
+                    let path_str = state.size_popup_path.as_ref()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+
+                    let latest_mtime = stats.all_entries.iter()
+                        .map(|e| e.mtime)
+                        .max();
+                    let latest_mtime_str = latest_mtime
+                        .map(format_system_time)
+                        .unwrap_or_else(|| "N/A".to_string());
+
+                    // Vertical layout: Top overview panel, then subdirectory breakdown table
+                    let chunks = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Length(5), // Top stats block
+                            Constraint::Length(1), // Divider
+                            Constraint::Min(0),    // Table of subdirs
+                        ])
+                        .split(inner_area);
+
+                    // 1. Render Top Overview Block
+                    let total_size_str = crate::fs::walker::format_size(stats.total_size);
+                    let overview_text = vec![
+                        Line::from(vec![
+                            Span::styled(" Path: ", Style::default().fg(Color::Gray)),
+                            Span::styled(path_str, Style::default().fg(Color::White).bold()),
+                        ]),
+                        Line::from(vec![
+                            Span::styled(" Size: ", Style::default().fg(Color::Gray)),
+                            Span::styled(total_size_str, Style::default().fg(Color::LightGreen).bold()),
+                            Span::styled(" │ Files: ", Style::default().fg(Color::Gray)),
+                            Span::styled(stats.file_count.to_string(), Style::default().fg(Color::LightBlue).bold()),
+                            Span::styled(" │ Latest Access: ", Style::default().fg(Color::Gray)),
+                            Span::styled(latest_mtime_str, Style::default().fg(Color::LightYellow).bold()),
+                        ]),
+                    ];
+                    let overview_para = Paragraph::new(overview_text)
+                        .style(Style::default());
+                    f.render_widget(overview_para, chunks[0]);
+
+                    // Divider
+                    let divider = Paragraph::new("─".repeat(chunks[1].width as usize))
+                        .style(Style::default().fg(Color::Rgb(60, 60, 60)));
+                    f.render_widget(divider, chunks[1]);
+
+                    // 2. Render Subdirectory Breakdown Table
+                    // Sort subdirectories by size descending
+                    let mut subdirs: Vec<(&std::path::PathBuf, &u64)> = stats.subdirs.iter().collect();
+                    subdirs.sort_by(|a, b| b.1.cmp(a.1));
+
+                    let header = ratatui::widgets::Row::new(vec![
+                        ratatui::widgets::Cell::from(Span::styled("Subdirectory", Style::default().fg(Color::LightCyan).bold())),
+                        ratatui::widgets::Cell::from(Span::styled("Size", Style::default().fg(Color::LightCyan).bold())),
+                        ratatui::widgets::Cell::from(Span::styled("Share", Style::default().fg(Color::LightCyan).bold())),
+                    ])
+                    .bottom_margin(1);
+
+                    let total_size = if stats.total_size > 0 { stats.total_size as f64 } else { 1.0 };
+                    let rows: Vec<ratatui::widgets::Row> = subdirs.iter()
+                        .map(|(path, size)| {
+                            let rel_path = path.file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| path.to_string_lossy().to_string());
+                            let size_str = crate::fs::walker::format_size(**size);
+                            let percent = (**size as f64 / total_size) * 100.0;
+                            let percent_str = format!("{:.1}%", percent);
+
+                            // Draw a small visual bar representing percentage
+                            let bar_chars = ((percent / 10.0).round() as usize).min(10);
+                            let bar = format!("{}{}", "█".repeat(bar_chars), "░".repeat(10 - bar_chars));
+
+                            ratatui::widgets::Row::new(vec![
+                                ratatui::widgets::Cell::from(Span::styled(rel_path, Style::default().fg(Color::White))),
+                                ratatui::widgets::Cell::from(Span::styled(size_str, Style::default().fg(Color::LightGreen))),
+                                ratatui::widgets::Cell::from(Span::styled(format!("{} {}", bar, percent_str), Style::default().fg(Color::LightBlue))),
+                            ])
+                        })
+                        .collect();
+
+                    let table_widths = [
+                        Constraint::Percentage(40),
+                        Constraint::Percentage(20),
+                        Constraint::Percentage(40),
+                    ];
+
+                    let table = ratatui::widgets::Table::new(rows, table_widths)
+                        .header(header)
+                        .column_spacing(2);
+
+                    f.render_widget(table, chunks[2]);
+                }
+            }
+        }
+    }
+}
+
 fn render_modal(f: &mut Frame, state: &AppState) {
     if state.modal_mode == crate::app::ModalMode::None {
         return;
@@ -123,6 +306,11 @@ fn render_modal(f: &mut Frame, state: &AppState) {
 
     if state.modal_mode == crate::app::ModalMode::CommandPalette {
         render_command_palette(f, state, f.size());
+        return;
+    }
+
+    if state.modal_mode == crate::app::ModalMode::SizeDetails {
+        render_size_details_popup(f, state);
         return;
     }
 

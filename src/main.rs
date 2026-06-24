@@ -936,6 +936,9 @@ fn event_loop(
                         {
                             state.trigger_size_details_popup();
                         }
+                        KeyCode::Char('K') => {
+                            state.trigger_size_details_popup();
+                        }
                         KeyCode::Up | KeyCode::Char('k') => state.move_selection(-1),
                         KeyCode::Enter => {
                             if let Some(target) = state.selected_item() {

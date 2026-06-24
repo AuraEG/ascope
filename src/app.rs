@@ -740,7 +740,17 @@ impl AppState {
                 self.size_popup_progress = Some(progress.clone());
 
                 crate::fs::walker::scan_path_async(path, stats, progress);
+            } else {
+                self.notification = Some((
+                    "Cannot scan size: selected item is a file (must select a folder)".to_string(),
+                    std::time::Instant::now(),
+                ));
             }
+        } else {
+            self.notification = Some((
+                "No item selected to scan".to_string(),
+                std::time::Instant::now(),
+            ));
         }
     }
 
