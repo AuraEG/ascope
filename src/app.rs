@@ -36,6 +36,7 @@ pub enum ModalMode {
     OpenConfirmation,
     DeleteConfirmation,
     SearchOverlay,
+    CommandPalette,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +162,12 @@ pub struct AppState {
     pub search_overlay_focused: bool,
     pub rg_query_tx: std::sync::mpsc::Sender<crate::search::ripgrep::RgSearchQuery>,
     pub rg_match_rx: std::sync::mpsc::Receiver<crate::search::ripgrep::RgMessage>,
+    pub command_palette_input: String,
+    pub command_palette_candidates: Vec<crate::project::detector::DetectedCommand>,
+    pub command_palette_results: Vec<crate::project::detector::DetectedCommand>,
+    pub command_palette_selected_index: usize,
+    pub command_palette_cursor_index: usize,
+    pub command_palette_focused: bool,
 }
 
 // --------------------------------------------------------------------------
@@ -375,8 +382,8 @@ impl AppState {
             }
         });
 
-        Self {
-            current_path: root,
+        let mut state = Self {
+            current_path: root.clone(),
             active_stats,
             scan_progress,
             navigation: crate::navigation::Navigation::new(
@@ -421,7 +428,36 @@ impl AppState {
             search_overlay_focused: true,
             rg_query_tx,
             rg_match_rx,
+            command_palette_input: String::new(),
+            command_palette_candidates: Vec::new(),
+            command_palette_results: Vec::new(),
+            command_palette_selected_index: 0,
+            command_palette_cursor_index: 0,
+            command_palette_focused: true,
+        };
+
+        // Discovered project commands
+        let mut candidates = crate::project::detector::detect_project_commands(&root);
+        // Discovered user session commands
+        let session_cfg = crate::config::session::parse_session_config(&root);
+        for custom in session_cfg.commands {
+            candidates.push(crate::project::detector::DetectedCommand {
+                name: custom.name,
+                cmd: custom.cmd,
+                source: ".ascope.toml".to_string(),
+            });
         }
+        // System commands
+        candidates.push(crate::project::detector::DetectedCommand {
+            name: "Reload Plugins".to_string(),
+            cmd: "reload_plugins".to_string(),
+            source: "System".to_string(),
+        });
+        
+        state.command_palette_candidates = candidates.clone();
+        state.command_palette_results = candidates;
+
+        state
     }
 
     // ------------------------------------------------------------------
@@ -1451,6 +1487,38 @@ impl AppState {
                     });
             }
         }
+    }
+
+    pub fn update_command_palette_results(&mut self) {
+        if self.command_palette_input.is_empty() {
+            self.command_palette_results = self.command_palette_candidates.clone();
+            self.command_palette_selected_index = 0;
+            return;
+        }
+
+        use nucleo::{
+            pattern::{CaseMatching, Normalization, Pattern},
+            Config, Matcher,
+        };
+
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let pattern = Pattern::parse(
+            &self.command_palette_input,
+            CaseMatching::Smart,
+            Normalization::Smart,
+        );
+
+        let mut results = Vec::new();
+        for item in &self.command_palette_candidates {
+            let haystack = nucleo::Utf32String::from(item.name.as_str());
+            if let Some(score) = pattern.score(haystack.slice(..), &mut matcher) {
+                results.push((item.clone(), score));
+            }
+        }
+        results.sort_by_key(|b| std::cmp::Reverse(b.1));
+
+        self.command_palette_results = results.into_iter().map(|(item, _)| item).collect();
+        self.command_palette_selected_index = 0;
     }
 }
 
