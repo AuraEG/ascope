@@ -15,3 +15,8 @@ pub mod plugin {
 pub mod search {
     pub mod ripgrep;
 }
+
+pub mod project {
+    pub mod detector;
+}
+
