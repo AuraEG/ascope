@@ -763,7 +763,118 @@ fn render_right_pane(f: &mut Frame, state: &AppState, area: Rect) {
     render_size_bars(f, state, area);
 }
 
+fn render_directory_dashboard(f: &mut Frame, state: &AppState, area: Rect, path: &std::path::Path) {
+    let summary = state.get_folder_dashboard(path);
+
+    let block = Block::default()
+        .title(" Folder Analysis ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(150, 100, 220))); // purple border
+
+    let inner_area = block.inner(area);
+    f.render_widget(block, area);
+
+    // Layout chunks
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Header
+            Constraint::Length(4), // Summary
+            Constraint::Length(7), // Top Files
+            Constraint::Min(0),    // File Types
+            Constraint::Length(1), // Footer notice
+        ])
+        .split(inner_area);
+
+    // Header
+    let folder_name = path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string());
+    let header_text = vec![
+        Line::from(vec![
+            Span::styled(" 󰉋  ", Style::default().fg(Color::Yellow).bold()),
+            Span::styled(folder_name, Style::default().fg(Color::White).bold()),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("  Path: {}", path.to_string_lossy()), Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(header_text), chunks[0]);
+
+    // Summary
+    let total_size_str = crate::fs::walker::format_size(summary.total_immediate_size);
+    let summary_text = vec![
+        Line::from(vec![
+            Span::styled("  Immediate Files : ", Style::default().fg(Color::Gray)),
+            Span::styled(summary.file_count.to_string(), Style::default().fg(Color::LightBlue).bold()),
+        ]),
+        Line::from(vec![
+            Span::styled("  Subdirectories  : ", Style::default().fg(Color::Gray)),
+            Span::styled(summary.dir_count.to_string(), Style::default().fg(Color::LightMagenta).bold()),
+        ]),
+        Line::from(vec![
+            Span::styled("  Immediate Size  : ", Style::default().fg(Color::Gray)),
+            Span::styled(total_size_str, Style::default().fg(Color::LightGreen).bold()),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(summary_text), chunks[1]);
+
+    // Top Files list
+    let mut top_files_items = vec![
+        Line::from(Span::styled("  󰈚  Top Files by Size:", Style::default().fg(Color::LightCyan).bold())),
+    ];
+    if summary.top_files.is_empty() {
+        top_files_items.push(Line::from(Span::styled("    (No files in this folder)", Style::default().fg(Color::DarkGray))));
+    } else {
+        for (name, size) in &summary.top_files {
+            let size_str = crate::fs::walker::format_size(*size);
+            top_files_items.push(Line::from(vec![
+                Span::styled("    • ", Style::default().fg(Color::DarkGray)),
+                Span::styled(name.clone(), Style::default().fg(Color::White)),
+                Span::styled(format!(" ({})", size_str), Style::default().fg(Color::LightGreen)),
+            ]));
+        }
+    }
+    f.render_widget(Paragraph::new(top_files_items), chunks[2]);
+
+    // File Types Breakdown (Extensions list)
+    let mut ext_items = vec![
+        Line::from(Span::styled("  󰬛  File Type Distribution:", Style::default().fg(Color::LightCyan).bold())),
+    ];
+    if summary.extension_counts.is_empty() {
+        ext_items.push(Line::from(Span::styled("    (No file types discovered)", Style::default().fg(Color::DarkGray))));
+    } else {
+        // Draw up to 5 extension breakdowns
+        for (ext, count) in summary.extension_counts.iter().take(5) {
+            let ext_label = if ext.is_empty() { "no extension" } else { ext.as_str() };
+            ext_items.push(Line::from(vec![
+                Span::styled("    • ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{:<15}", ext_label), Style::default().fg(Color::LightBlue)),
+                Span::styled(format!(": {} files", count), Style::default().fg(Color::Gray)),
+            ]));
+        }
+    }
+    f.render_widget(Paragraph::new(ext_items), chunks[3]);
+
+    // Footer notice
+    let footer_text = Line::from(vec![
+        Span::styled("  Press ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Shift+K", Style::default().fg(Color::Yellow).bold()),
+        Span::styled(" or ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Ctrl+k", Style::default().fg(Color::Yellow).bold()),
+        Span::styled(" for deep recursive storage analysis ", Style::default().fg(Color::DarkGray)),
+    ]);
+    f.render_widget(Paragraph::new(footer_text), chunks[4]);
+}
+
 fn render_size_bars(f: &mut Frame, state: &AppState, area: Rect) {
+    if let Some(entry) = state.selected_item() {
+        if entry.entry_type == EntryType::Directory {
+            render_directory_dashboard(f, state, area, &entry.path);
+            return;
+        }
+    }
+
     let visible = state.visible_items();
     // The largest entry anchors the scale so all bars are relative to it.
     let max_size = visible.first().map(|(e, _)| e.size).unwrap_or(0).max(1);
