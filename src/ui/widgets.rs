@@ -101,6 +101,231 @@ fn render_tab_bar(f: &mut Frame, state: &AppState, area: Rect) {
     f.render_widget(paragraph, area);
 }
 
+fn render_size_details_popup(f: &mut Frame, state: &AppState) {
+    let screen = f.size();
+    let area = centered_rect(75, 75, screen);
+
+    // 1. Draw Dropshadow
+    if area.width > 1 && area.height > 1 {
+        let shadow_area = Rect {
+            x: (area.x + 1).min(screen.width.saturating_sub(1)),
+            y: (area.y + 1).min(screen.height.saturating_sub(1)),
+            width: area.width.min(screen.width.saturating_sub(area.x + 1)),
+            height: area.height.min(screen.height.saturating_sub(area.y + 1)),
+        };
+        let shadow_block = Block::default().style(Style::default().bg(Color::Rgb(12, 12, 16)));
+        f.render_widget(shadow_block, shadow_area);
+    }
+
+    // 2. Clear underlying screen
+    f.render_widget(Clear, area);
+
+    // Border and Title block
+    let border_color = Color::Rgb(150, 100, 220); // Aura purple
+    let title_line = Line::from(vec![
+        Span::styled(" 󰉋 ", Style::default().fg(border_color).bold()),
+        Span::styled(
+            " Deep Directory Storage Analysis ",
+            Style::default().fg(Color::LightCyan).bold(),
+        ),
+    ]);
+    let footer_line = Line::from(vec![
+        Span::styled(
+            " [Esc] ",
+            Style::default().fg(Color::Rgb(0, 180, 216)).bold(),
+        ),
+        Span::styled("close popup ", Style::default().fg(Color::Gray)),
+    ]);
+
+    let block = Block::default()
+        .title(title_line)
+        .title_alignment(Alignment::Center)
+        .title_bottom(footer_line)
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
+
+    let inner_area = block.inner(area);
+    f.render_widget(block, area);
+
+    // Get scan progress
+    let progress = state
+        .size_popup_progress
+        .as_ref()
+        .and_then(|p| p.lock().ok())
+        .map(|p| p.clone())
+        .unwrap_or(crate::fs::walker::ScanProgress::Idle);
+
+    match progress {
+        crate::fs::walker::ScanProgress::Idle | crate::fs::walker::ScanProgress::Scanning => {
+            // Draw loading animation/spinner
+            let spinner = match std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() / 150 % 8)
+                .unwrap_or(0)
+            {
+                0 => "⠋",
+                1 => "⠙",
+                2 => "⠹",
+                3 => "⠸",
+                4 => "⠼",
+                5 => "⠴",
+                6 => "⠦",
+                7 => "⠧",
+                _ => "⠋",
+            };
+
+            let text = format!(" {} Analyzing storage size, file count, and access history...\n Please wait for deep scan to finish.", spinner);
+            let paragraph = Paragraph::new(text)
+                .style(Style::default().fg(Color::LightYellow))
+                .alignment(Alignment::Center);
+
+            // Centered vertically
+            let center_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(40),
+                    Constraint::Percentage(20),
+                    Constraint::Percentage(40),
+                ])
+                .split(inner_area);
+
+            f.render_widget(paragraph, center_layout[1]);
+        }
+        crate::fs::walker::ScanProgress::Complete => {
+            if let Some(stats_lock) = &state.size_popup_stats {
+                if let Ok(stats) = stats_lock.lock() {
+                    let path_str = state
+                        .size_popup_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+
+                    let latest_mtime = stats.all_entries.iter().map(|e| e.mtime).max();
+                    let latest_mtime_str = latest_mtime
+                        .map(format_system_time)
+                        .unwrap_or_else(|| "N/A".to_string());
+
+                    // Vertical layout: Top overview panel, then subdirectory breakdown table
+                    let chunks = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Length(5), // Top stats block
+                            Constraint::Length(1), // Divider
+                            Constraint::Min(0),    // Table of subdirs
+                        ])
+                        .split(inner_area);
+
+                    // 1. Render Top Overview Block
+                    let total_size_str = crate::fs::walker::format_size(stats.total_size);
+                    let overview_text = vec![
+                        Line::from(vec![
+                            Span::styled(" Path: ", Style::default().fg(Color::Gray)),
+                            Span::styled(path_str, Style::default().fg(Color::White).bold()),
+                        ]),
+                        Line::from(vec![
+                            Span::styled(" Size: ", Style::default().fg(Color::Gray)),
+                            Span::styled(
+                                total_size_str,
+                                Style::default().fg(Color::LightGreen).bold(),
+                            ),
+                            Span::styled(" │ Files: ", Style::default().fg(Color::Gray)),
+                            Span::styled(
+                                stats.file_count.to_string(),
+                                Style::default().fg(Color::LightBlue).bold(),
+                            ),
+                            Span::styled(" │ Latest Access: ", Style::default().fg(Color::Gray)),
+                            Span::styled(
+                                latest_mtime_str,
+                                Style::default().fg(Color::LightYellow).bold(),
+                            ),
+                        ]),
+                    ];
+                    let overview_para = Paragraph::new(overview_text).style(Style::default());
+                    f.render_widget(overview_para, chunks[0]);
+
+                    // Divider
+                    let divider = Paragraph::new("─".repeat(chunks[1].width as usize))
+                        .style(Style::default().fg(Color::Rgb(60, 60, 60)));
+                    f.render_widget(divider, chunks[1]);
+
+                    // 2. Render Subdirectory Breakdown Table
+                    // Sort subdirectories by size descending
+                    let mut subdirs: Vec<(&std::path::PathBuf, &u64)> =
+                        stats.subdirs.iter().collect();
+                    subdirs.sort_by(|a, b| b.1.cmp(a.1));
+
+                    let header = ratatui::widgets::Row::new(vec![
+                        ratatui::widgets::Cell::from(Span::styled(
+                            "Subdirectory",
+                            Style::default().fg(Color::LightCyan).bold(),
+                        )),
+                        ratatui::widgets::Cell::from(Span::styled(
+                            "Size",
+                            Style::default().fg(Color::LightCyan).bold(),
+                        )),
+                        ratatui::widgets::Cell::from(Span::styled(
+                            "Share",
+                            Style::default().fg(Color::LightCyan).bold(),
+                        )),
+                    ])
+                    .bottom_margin(1);
+
+                    let total_size = if stats.total_size > 0 {
+                        stats.total_size as f64
+                    } else {
+                        1.0
+                    };
+                    let rows: Vec<ratatui::widgets::Row> = subdirs
+                        .iter()
+                        .map(|(path, size)| {
+                            let rel_path = path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| path.to_string_lossy().to_string());
+                            let size_str = crate::fs::walker::format_size(**size);
+                            let percent = (**size as f64 / total_size) * 100.0;
+                            let percent_str = format!("{:.1}%", percent);
+
+                            // Draw a small visual bar representing percentage
+                            let bar_chars = ((percent / 10.0).round() as usize).min(10);
+                            let bar =
+                                format!("{}{}", "█".repeat(bar_chars), "░".repeat(10 - bar_chars));
+
+                            ratatui::widgets::Row::new(vec![
+                                ratatui::widgets::Cell::from(Span::styled(
+                                    rel_path,
+                                    Style::default().fg(Color::White),
+                                )),
+                                ratatui::widgets::Cell::from(Span::styled(
+                                    size_str,
+                                    Style::default().fg(Color::LightGreen),
+                                )),
+                                ratatui::widgets::Cell::from(Span::styled(
+                                    format!("{} {}", bar, percent_str),
+                                    Style::default().fg(Color::LightBlue),
+                                )),
+                            ])
+                        })
+                        .collect();
+
+                    let table_widths = [
+                        Constraint::Percentage(40),
+                        Constraint::Percentage(20),
+                        Constraint::Percentage(40),
+                    ];
+
+                    let table = ratatui::widgets::Table::new(rows, table_widths)
+                        .header(header)
+                        .column_spacing(2);
+
+                    f.render_widget(table, chunks[2]);
+                }
+            }
+        }
+    }
+}
+
 fn render_modal(f: &mut Frame, state: &AppState) {
     if state.modal_mode == crate::app::ModalMode::None {
         return;
@@ -118,6 +343,16 @@ fn render_modal(f: &mut Frame, state: &AppState) {
 
     if state.modal_mode == crate::app::ModalMode::SearchOverlay {
         render_search_modal(f, state, f.size());
+        return;
+    }
+
+    if state.modal_mode == crate::app::ModalMode::CommandPalette {
+        render_command_palette(f, state, f.size());
+        return;
+    }
+
+    if state.modal_mode == crate::app::ModalMode::SizeDetails {
+        render_size_details_popup(f, state);
         return;
     }
 
@@ -570,7 +805,153 @@ fn render_right_pane(f: &mut Frame, state: &AppState, area: Rect) {
     render_size_bars(f, state, area);
 }
 
+fn render_directory_dashboard(f: &mut Frame, state: &AppState, area: Rect, path: &std::path::Path) {
+    let summary = state.get_folder_dashboard(path);
+
+    let block = Block::default()
+        .title(" Folder Analysis ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(150, 100, 220))); // purple border
+
+    let inner_area = block.inner(area);
+    f.render_widget(block, area);
+
+    // Layout chunks
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Header
+            Constraint::Length(4), // Summary
+            Constraint::Length(7), // Top Files
+            Constraint::Min(0),    // File Types
+            Constraint::Length(1), // Footer notice
+        ])
+        .split(inner_area);
+
+    // Header
+    let folder_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string());
+    let header_text = vec![
+        Line::from(vec![
+            Span::styled(" 󰉋  ", Style::default().fg(Color::Yellow).bold()),
+            Span::styled(folder_name, Style::default().fg(Color::White).bold()),
+        ]),
+        Line::from(vec![Span::styled(
+            format!("  Path: {}", path.to_string_lossy()),
+            Style::default().fg(Color::DarkGray),
+        )]),
+    ];
+    f.render_widget(Paragraph::new(header_text), chunks[0]);
+
+    // Summary
+    let total_size_str = crate::fs::walker::format_size(summary.total_immediate_size);
+    let summary_text = vec![
+        Line::from(vec![
+            Span::styled("  Immediate Files : ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                summary.file_count.to_string(),
+                Style::default().fg(Color::LightBlue).bold(),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Subdirectories  : ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                summary.dir_count.to_string(),
+                Style::default().fg(Color::LightMagenta).bold(),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Immediate Size  : ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                total_size_str,
+                Style::default().fg(Color::LightGreen).bold(),
+            ),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(summary_text), chunks[1]);
+
+    // Top Files list
+    let mut top_files_items = vec![Line::from(Span::styled(
+        "  󰈚  Top Files by Size:",
+        Style::default().fg(Color::LightCyan).bold(),
+    ))];
+    if summary.top_files.is_empty() {
+        top_files_items.push(Line::from(Span::styled(
+            "    (No files in this folder)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for (name, size) in &summary.top_files {
+            let size_str = crate::fs::walker::format_size(*size);
+            top_files_items.push(Line::from(vec![
+                Span::styled("    • ", Style::default().fg(Color::DarkGray)),
+                Span::styled(name.clone(), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!(" ({})", size_str),
+                    Style::default().fg(Color::LightGreen),
+                ),
+            ]));
+        }
+    }
+    f.render_widget(Paragraph::new(top_files_items), chunks[2]);
+
+    // File Types Breakdown (Extensions list)
+    let mut ext_items = vec![Line::from(Span::styled(
+        "  󰬛  File Type Distribution:",
+        Style::default().fg(Color::LightCyan).bold(),
+    ))];
+    if summary.extension_counts.is_empty() {
+        ext_items.push(Line::from(Span::styled(
+            "    (No file types discovered)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        // Draw up to 5 extension breakdowns
+        for (ext, count) in summary.extension_counts.iter().take(5) {
+            let ext_label = if ext.is_empty() {
+                "no extension"
+            } else {
+                ext.as_str()
+            };
+            ext_items.push(Line::from(vec![
+                Span::styled("    • ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{:<15}", ext_label),
+                    Style::default().fg(Color::LightBlue),
+                ),
+                Span::styled(
+                    format!(": {} files", count),
+                    Style::default().fg(Color::Gray),
+                ),
+            ]));
+        }
+    }
+    f.render_widget(Paragraph::new(ext_items), chunks[3]);
+
+    // Footer notice
+    let footer_text = Line::from(vec![
+        Span::styled("  Press ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Shift+K", Style::default().fg(Color::Yellow).bold()),
+        Span::styled(" or ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Ctrl+k", Style::default().fg(Color::Yellow).bold()),
+        Span::styled(
+            " for deep recursive storage analysis ",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]);
+    f.render_widget(Paragraph::new(footer_text), chunks[4]);
+}
+
 fn render_size_bars(f: &mut Frame, state: &AppState, area: Rect) {
+    if let Some(entry) = state.selected_item() {
+        if entry.entry_type == EntryType::Directory {
+            render_directory_dashboard(f, state, area, &entry.path);
+            return;
+        }
+    }
+
     let visible = state.visible_items();
     // The largest entry anchors the scale so all bars are relative to it.
     let max_size = visible.first().map(|(e, _)| e.size).unwrap_or(0).max(1);
@@ -1530,6 +1911,11 @@ static HELP_ITEMS: &[HelpItem] = &[
         context: "Search",
     },
     HelpItem {
+        key: "Alt+p / :",
+        desc: "Open Command Palette Overlay",
+        context: "Search",
+    },
+    HelpItem {
         key: "Esc",
         desc: "Close current overlay / modal",
         context: "Modals",
@@ -1798,6 +2184,147 @@ fn render_search_modal(f: &mut Frame, state: &AppState, area: Rect) {
         let mut scrollbar_state = ScrollbarState::default()
             .content_length(total_results)
             .position(state.search_overlay_selected_index);
+
+        let scrollbar_area = chunks[1].inner(&Margin {
+            vertical: 1,
+            horizontal: 0,
+        });
+
+        f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+    }
+}
+
+fn render_command_palette(f: &mut Frame, state: &AppState, area: Rect) {
+    let modal_area = centered_rect(70, 50, area);
+    f.render_widget(Clear, modal_area);
+
+    let footer = Line::from(vec![
+        Span::styled(" [j/k] ", Style::default().fg(Color::Cyan).bold()),
+        Span::raw("navigate │"),
+        Span::styled(" [Enter] ", Style::default().fg(Color::Green).bold()),
+        Span::raw("execute │"),
+        Span::styled(" [Esc] ", Style::default().fg(Color::Red).bold()),
+        Span::raw("close"),
+    ]);
+
+    let border_color = if state.command_palette_input.starts_with('!') {
+        Color::Yellow
+    } else {
+        Color::Rgb(160, 32, 240) // vibrant purple
+    };
+
+    let block = Block::default()
+        .title(Line::from(vec![
+            Span::styled(" 󰍉 ", Style::default().fg(Color::Magenta).bold()),
+            Span::styled(
+                " Command Palette ",
+                Style::default().fg(Color::White).bold(),
+            ),
+        ]))
+        .title_bottom(footer)
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .style(Style::default().bg(Color::Rgb(25, 25, 30)));
+
+    let inner_area = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let chunks = Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(inner_area);
+
+    // Prompt input
+    let input_title = if state.command_palette_input.starts_with('!') {
+        " Enter your Command "
+    } else {
+        " Search Commands "
+    };
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(input_title);
+    let input_para = Paragraph::new(state.command_palette_input.as_str())
+        .block(input_block)
+        .style(Style::default().fg(Color::White));
+    f.render_widget(input_para, chunks[0]);
+
+    if state.command_palette_focused {
+        f.set_cursor(
+            chunks[0].x + 1 + state.command_palette_cursor_index as u16,
+            chunks[0].y + 1,
+        );
+    }
+
+    // Results list
+    let total_results = state.command_palette_results.len();
+    let list_height = (chunks[1].height as usize).saturating_sub(1);
+
+    let start_idx = if total_results <= list_height {
+        0
+    } else {
+        let half = list_height / 2;
+        let cursor = state.command_palette_selected_index;
+        if cursor < half {
+            0
+        } else if cursor >= total_results - half {
+            total_results - list_height
+        } else {
+            cursor - half
+        }
+    };
+
+    let end_idx = total_results.min(start_idx + list_height);
+    let window = &state.command_palette_results[start_idx..end_idx];
+
+    let list_items: Vec<ListItem> = window
+        .iter()
+        .enumerate()
+        .map(|(i, result)| {
+            let actual_idx = start_idx + i;
+            let is_selected = actual_idx == state.command_palette_selected_index;
+
+            let text_style = if is_selected {
+                Style::default().fg(Color::Black).bg(Color::Magenta).bold()
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            let source_style = if is_selected {
+                Style::default().fg(Color::Rgb(50, 50, 50)).bold()
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("[{}] ", result.source), source_style),
+                Span::styled(result.name.clone(), text_style),
+                Span::raw(" - "),
+                Span::styled(result.cmd.clone(), Style::default().fg(Color::Gray)),
+            ]))
+        })
+        .collect();
+
+    let list_block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(format!(" Actions ({}) ", total_results));
+
+    let list = List::new(list_items).block(list_block);
+    f.render_widget(list, chunks[1]);
+
+    // Draw scrollbar
+    if total_results > list_height {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_symbol(Some("░"))
+            .thumb_symbol("█");
+
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(total_results)
+            .position(state.command_palette_selected_index);
 
         let scrollbar_area = chunks[1].inner(&Margin {
             vertical: 1,

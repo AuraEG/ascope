@@ -9,6 +9,8 @@
 // Created : 2026-06-14
 // ==========================================================================
 
+pub mod session;
+
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fs::File;

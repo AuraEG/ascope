@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use crate::fs::walker::{scan_immediate, scan_path_async, PathStats, ScanProgress};
+use crate::fs::walker::{scan_immediate, PathStats, ScanProgress};
 use crate::git::GitContext;
 use image::GenericImageView as _;
 use ratatui::text::Line;
@@ -36,6 +36,8 @@ pub enum ModalMode {
     OpenConfirmation,
     DeleteConfirmation,
     SearchOverlay,
+    CommandPalette,
+    SizeDetails,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +163,79 @@ pub struct AppState {
     pub search_overlay_focused: bool,
     pub rg_query_tx: std::sync::mpsc::Sender<crate::search::ripgrep::RgSearchQuery>,
     pub rg_match_rx: std::sync::mpsc::Receiver<crate::search::ripgrep::RgMessage>,
+    pub command_palette_input: String,
+    pub command_palette_candidates: Vec<crate::project::detector::DetectedCommand>,
+    pub command_palette_results: Vec<crate::project::detector::DetectedCommand>,
+    pub command_palette_selected_index: usize,
+    pub command_palette_cursor_index: usize,
+    pub command_palette_focused: bool,
+    pub size_popup_path: Option<PathBuf>,
+    pub size_popup_stats: Option<Arc<Mutex<PathStats>>>,
+    pub size_popup_progress: Option<Arc<Mutex<ScanProgress>>>,
+    pub right_pane_dashboard_cache: std::cell::RefCell<Option<(PathBuf, FolderDashboardSummary)>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FolderDashboardSummary {
+    pub path: PathBuf,
+    pub file_count: usize,
+    pub dir_count: usize,
+    pub total_immediate_size: u64,
+    pub top_files: Vec<(String, u64)>,          // Name and size
+    pub extension_counts: Vec<(String, usize)>, // Extension and count
+}
+
+impl FolderDashboardSummary {
+    pub fn calculate(path: &std::path::Path) -> Self {
+        let mut file_count = 0;
+        let mut dir_count = 0;
+        let mut total_immediate_size = 0;
+        let mut files = Vec::new();
+        let mut ext_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+
+        if let Ok(read_dir) = std::fs::read_dir(path) {
+            for entry in read_dir.flatten() {
+                let file_type = entry.file_type();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if let Ok(ft) = file_type {
+                    if ft.is_dir() {
+                        dir_count += 1;
+                    } else if ft.is_file() {
+                        file_count += 1;
+                        let metadata = entry.metadata();
+                        let size = metadata.map(|m| m.len()).unwrap_or(0);
+                        total_immediate_size += size;
+                        files.push((name.clone(), size));
+
+                        // Get extension
+                        let ext = std::path::Path::new(&name)
+                            .extension()
+                            .map(|e| e.to_string_lossy().to_string().to_lowercase())
+                            .unwrap_or_else(|| "no ext".to_string());
+                        *ext_counts.entry(ext).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
+        // Sort files by size descending, keep top 5
+        files.sort_by_key(|x| std::cmp::Reverse(x.1));
+        files.truncate(5);
+
+        // Sort extension counts by frequency descending
+        let mut extension_counts: Vec<(String, usize)> = ext_counts.into_iter().collect();
+        extension_counts.sort_by_key(|x| std::cmp::Reverse(x.1));
+
+        Self {
+            path: path.to_path_buf(),
+            file_count,
+            dir_count,
+            total_immediate_size,
+            top_files: files,
+            extension_counts,
+        }
+    }
 }
 
 // --------------------------------------------------------------------------
@@ -178,13 +253,7 @@ impl AppState {
         Vec<DirEntry>,
     ) {
         let active_stats = Arc::new(Mutex::new(PathStats::default()));
-        let scan_progress = Arc::new(Mutex::new(ScanProgress::default()));
-
-        scan_path_async(
-            path.to_path_buf(),
-            Arc::clone(&active_stats),
-            Arc::clone(&scan_progress),
-        );
+        let scan_progress = Arc::new(Mutex::new(ScanProgress::Complete));
 
         let git_ctx = GitContext::read(path);
         let immediate_entries = scan_immediate(path).unwrap_or_default();
@@ -375,8 +444,8 @@ impl AppState {
             }
         });
 
-        Self {
-            current_path: root,
+        let mut state = Self {
+            current_path: root.clone(),
             active_stats,
             scan_progress,
             navigation: crate::navigation::Navigation::new(
@@ -421,7 +490,40 @@ impl AppState {
             search_overlay_focused: true,
             rg_query_tx,
             rg_match_rx,
+            command_palette_input: String::new(),
+            command_palette_candidates: Vec::new(),
+            command_palette_results: Vec::new(),
+            command_palette_selected_index: 0,
+            command_palette_cursor_index: 0,
+            command_palette_focused: true,
+            size_popup_path: None,
+            size_popup_stats: None,
+            size_popup_progress: None,
+            right_pane_dashboard_cache: std::cell::RefCell::new(None),
+        };
+
+        // Discovered project commands
+        let mut candidates = crate::project::detector::detect_project_commands(&root);
+        // Discovered user session commands
+        let session_cfg = crate::config::session::parse_session_config(&root);
+        for custom in session_cfg.commands {
+            candidates.push(crate::project::detector::DetectedCommand {
+                name: custom.name,
+                cmd: custom.cmd,
+                source: ".ascope.toml".to_string(),
+            });
         }
+        // System commands
+        candidates.push(crate::project::detector::DetectedCommand {
+            name: "Reload Plugins".to_string(),
+            cmd: "reload_plugins".to_string(),
+            source: "System".to_string(),
+        });
+
+        state.command_palette_candidates = candidates.clone();
+        state.command_palette_results = candidates;
+
+        state
     }
 
     // ------------------------------------------------------------------
@@ -464,31 +566,33 @@ impl AppState {
             )
         {
             let stats = self.active_stats.lock().unwrap_or_else(|e| e.into_inner());
-            let new_items: Vec<DirEntry> = stats
-                .all_entries
-                .iter()
-                .filter(|entry| entry.path.parent() == Some(&self.current_path))
-                .cloned()
-                .collect();
-            self.all_entries = stats.all_entries.clone();
-            drop(stats);
+            if !stats.all_entries.is_empty() {
+                let new_items: Vec<DirEntry> = stats
+                    .all_entries
+                    .iter()
+                    .filter(|entry| entry.path.parent() == Some(&self.current_path))
+                    .cloned()
+                    .collect();
+                self.all_entries = stats.all_entries.clone();
+                drop(stats);
 
-            // Save currently selected item's path
-            let selected_path = self.navigation.current_selection().map(|e| e.path.clone());
+                // Save currently selected item's path
+                let selected_path = self.navigation.current_selection().map(|e| e.path.clone());
 
-            // Use Navigation to update items (handles sorting automatically)
-            self.navigation.update_items(new_items);
-            self.sync_navigation_items();
+                // Use Navigation to update items (handles sorting automatically)
+                self.navigation.update_items(new_items);
+                self.sync_navigation_items();
+
+                // Restore selection
+                if let Some(path) = selected_path {
+                    self.navigation.select_path(&path);
+                }
+
+                if let Some(query) = self.navigation.filter_query().map(String::from) {
+                    self.navigation.set_filter(Some(query), &self.all_entries);
+                }
+            }
             self.scan_applied = true;
-
-            // Restore selection
-            if let Some(path) = selected_path {
-                self.navigation.select_path(&path);
-            }
-
-            if let Some(query) = self.navigation.filter_query().map(String::from) {
-                self.navigation.set_filter(Some(query), &self.all_entries);
-            }
         }
     }
 
@@ -666,9 +770,76 @@ impl AppState {
 
     /// Toggle the expansion state of the currently selected directory.
     pub fn toggle_expand(&mut self) {
-        self.navigation.toggle_expand_selected();
+        if let Some(entry) = self.navigation.current_selection().cloned() {
+            if entry.entry_type == EntryType::Directory {
+                let path = entry.path.clone();
+                self.navigation.toggle_expand_selected();
+
+                // If it is now expanded, ensure its immediate children are loaded dynamically
+                if self.navigation.is_expanded(&path) {
+                    let has_children = self
+                        .all_entries
+                        .iter()
+                        .any(|e| e.path.parent() == Some(&path));
+                    if !has_children {
+                        if let Ok(children) = scan_immediate(&path) {
+                            self.all_entries.extend(children);
+                        }
+                    }
+                }
+            }
+        }
         self.sync_navigation_items();
         self.reset_selection_timeout();
+    }
+
+    /// Trigger the size details popup for the currently selected directory.
+    pub fn trigger_size_details_popup(&mut self) {
+        if let Some(entry) = self.selected_item() {
+            if entry.entry_type == EntryType::Directory {
+                let path = entry.path.clone();
+                self.modal_mode = ModalMode::SizeDetails;
+                self.size_popup_path = Some(path.clone());
+
+                let stats = Arc::new(Mutex::new(PathStats::default()));
+                let progress = Arc::new(Mutex::new(ScanProgress::Idle));
+
+                self.size_popup_stats = Some(stats.clone());
+                self.size_popup_progress = Some(progress.clone());
+
+                crate::fs::walker::scan_path_async(path, stats, progress);
+            } else {
+                self.notification = Some((
+                    "Cannot scan size: selected item is a file (must select a folder)".to_string(),
+                    std::time::Instant::now(),
+                ));
+            }
+        } else {
+            self.notification = Some((
+                "No item selected to scan".to_string(),
+                std::time::Instant::now(),
+            ));
+        }
+    }
+
+    /// Close the size details popup and clear the popup state.
+    pub fn close_size_details_popup(&mut self) {
+        self.modal_mode = ModalMode::None;
+        self.size_popup_path = None;
+        self.size_popup_stats = None;
+        self.size_popup_progress = None;
+    }
+
+    /// Retrieve the dashboard summary for the selected directory, using cache if available.
+    pub fn get_folder_dashboard(&self, path: &std::path::Path) -> FolderDashboardSummary {
+        if let Some((ref cached_path, ref summary)) = *self.right_pane_dashboard_cache.borrow() {
+            if cached_path == path {
+                return summary.clone();
+            }
+        }
+        let summary = FolderDashboardSummary::calculate(path);
+        *self.right_pane_dashboard_cache.borrow_mut() = Some((path.to_path_buf(), summary.clone()));
+        summary
     }
 
     fn get_children(&self, parent_path: &std::path::Path) -> Vec<DirEntry> {
@@ -1452,6 +1623,77 @@ impl AppState {
             }
         }
     }
+
+    pub fn update_command_palette_results(&mut self) {
+        if self.command_palette_input.starts_with('!') {
+            let cmd_to_run = self.command_palette_input[1..].trim().to_string();
+            if cmd_to_run.is_empty() {
+                self.command_palette_results = vec![crate::project::detector::DetectedCommand {
+                    name: "Enter a shell command to execute...".to_string(),
+                    cmd: "".to_string(),
+                    source: "Shell".to_string(),
+                }];
+            } else {
+                self.command_palette_results = vec![crate::project::detector::DetectedCommand {
+                    name: format!("Run: {}", cmd_to_run),
+                    cmd: cmd_to_run.clone(),
+                    source: "Shell".to_string(),
+                }];
+            }
+            self.command_palette_selected_index = 0;
+            return;
+        }
+
+        if self.command_palette_input.is_empty() {
+            self.command_palette_results = self.command_palette_candidates.clone();
+            self.command_palette_selected_index = 0;
+            return;
+        }
+
+        use nucleo::{
+            pattern::{CaseMatching, Normalization, Pattern},
+            Config, Matcher,
+        };
+
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let pattern = Pattern::parse(
+            &self.command_palette_input,
+            CaseMatching::Smart,
+            Normalization::Smart,
+        );
+
+        let mut results = Vec::new();
+        for item in &self.command_palette_candidates {
+            let haystack = nucleo::Utf32String::from(item.name.as_str());
+            if let Some(score) = pattern.score(haystack.slice(..), &mut matcher) {
+                results.push((item.clone(), score));
+            }
+        }
+        results.sort_by_key(|b| std::cmp::Reverse(b.1));
+
+        self.command_palette_results = results.into_iter().map(|(item, _)| item).collect();
+        self.command_palette_selected_index = 0;
+    }
+
+    pub fn rebuild_command_palette_candidates(&mut self) {
+        let root = &self.current_path;
+        let mut candidates = crate::project::detector::detect_project_commands(root);
+        let session_cfg = crate::config::session::parse_session_config(root);
+        for custom in session_cfg.commands {
+            candidates.push(crate::project::detector::DetectedCommand {
+                name: custom.name,
+                cmd: custom.cmd,
+                source: ".ascope.toml".to_string(),
+            });
+        }
+        candidates.push(crate::project::detector::DetectedCommand {
+            name: "Reload Plugins".to_string(),
+            cmd: "reload_plugins".to_string(),
+            source: "System".to_string(),
+        });
+
+        self.command_palette_candidates = candidates;
+    }
 }
 
 // --------------------------------------------------------------------------
@@ -1575,6 +1817,8 @@ mod tests {
 
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
+        state.navigation.select_path(&src_dir);
+        state.toggle_expand();
 
         state
             .navigation
@@ -1600,6 +1844,8 @@ mod tests {
 
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
+        state.navigation.select_path(&src_dir);
+        state.toggle_expand();
         state
             .navigation
             .set_filter(Some(String::from("app")), &state.all_entries);
@@ -1640,6 +1886,8 @@ mod tests {
 
         let mut state = AppState::new(dir.path().to_path_buf());
         wait_for_scan(&mut state);
+        state.navigation.select_path(&src_dir);
+        state.toggle_expand();
         state
             .navigation
             .set_filter(Some(String::from("main.rs")), &state.all_entries);
