@@ -1175,6 +1175,10 @@ fn event_loop(
         }
     }
 
+    if let Some(ref engine) = state.plugin_engine {
+        let _ = engine.trigger_event("on_shutdown", String::new());
+    }
+
     ascope::plugin::engine::clear_current_app_state();
     Ok(state.current_path)
 }

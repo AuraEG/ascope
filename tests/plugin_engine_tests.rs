@@ -424,6 +424,112 @@ fn test_plugin_exec_shell() {
     ascope::plugin::engine::clear_current_app_state();
 }
 
+#[test]
+fn test_plugin_lifecycle_events() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+
+    // Create a subfolder to navigate into
+    let subfolder = root.join("subfolder");
+    fs::create_dir_all(&subfolder).unwrap();
+
+    let plugin_dir = dir.path().join("my-plugin");
+    fs::create_dir_all(&plugin_dir).unwrap();
+
+    let mut toml_file = File::create(plugin_dir.join("plugin.toml")).unwrap();
+    write!(
+        toml_file,
+        r#"
+        name = "my-plugin"
+        version = "0.1.0"
+        author = "Developer"
+        main = "init.lua"
+    "#
+    )
+    .unwrap();
+
+    let mut lua_file = File::create(plugin_dir.join("init.lua")).unwrap();
+    write!(
+        lua_file,
+        "{}",
+        r#"
+        local events = {}
+        ascope.on("on_startup", function(p)
+            table.insert(events, "startup")
+        end)
+        ascope.on("on_enter", function(p)
+            table.insert(events, "enter:" .. p)
+        end)
+        ascope.on("on_file_select", function(p)
+            table.insert(events, "select:" .. p)
+        end)
+        ascope.on("on_tab_change", function(p)
+            table.insert(events, "tab:" .. p)
+        end)
+        ascope.on("on_shutdown", function(p)
+            table.insert(events, "shutdown")
+        end)
+
+        ascope.on("get_recorded_events", function()
+            return table.concat(events, ",")
+        end)
+    "#
+    )
+    .unwrap();
+
+    // Instantiate AppState
+    let mut state = ascope::app::AppState::new(root.clone());
+
+    // Copy the plugin to config plugins directory
+    let config_dir = root.join(".config/ascope/plugins");
+    fs::create_dir_all(&config_dir).unwrap();
+    let dest_plugin = config_dir.join("my-plugin");
+    fs::create_dir_all(&dest_plugin).unwrap();
+    fs::copy(
+        plugin_dir.join("plugin.toml"),
+        dest_plugin.join("plugin.toml"),
+    )
+    .unwrap();
+    fs::copy(plugin_dir.join("init.lua"), dest_plugin.join("init.lua")).unwrap();
+
+    let mut engine = PluginEngine::new(config_dir).unwrap();
+    engine.load_plugins().unwrap();
+
+    ascope::plugin::engine::set_current_app_state(&mut state as *mut ascope::app::AppState);
+    state.plugin_engine = Some(engine);
+
+    // Trigger on_startup manually since we bound engine after AppState construction in test
+    state.plugin_engine.as_ref().unwrap().trigger_event("on_startup", String::new()).unwrap();
+
+    // Simulate navigation/enter directory
+    state.jump_to_path(subfolder.clone());
+
+    // Simulate selection change
+    state.reset_selection_timeout();
+
+    // Create a mock tab and change tab
+    state.open_tab(root.clone());
+    state.load_tab(1);
+
+    // Simulate shutdown
+    state.plugin_engine.as_ref().unwrap().trigger_event("on_shutdown", String::new()).unwrap();
+
+    // Retrieve recorded events
+    let res = state.plugin_engine.as_ref().unwrap()
+        .trigger_event("get_recorded_events", String::new())
+        .unwrap();
+
+    assert_eq!(res.len(), 1);
+    let events_str = &res[0];
+    assert!(events_str.contains("startup"));
+    assert!(events_str.contains("enter:"));
+    assert!(events_str.contains("tab:2"));
+    assert!(events_str.contains("shutdown"));
+
+    ascope::plugin::engine::clear_current_app_state();
+}
+
+
 
 
 

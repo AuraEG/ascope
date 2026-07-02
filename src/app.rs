@@ -554,6 +554,7 @@ impl AppState {
             crate::plugin::engine::PluginEngine::new(root.join(".config/ascope/plugins")).ok();
         if let Some(ref mut engine) = plugin_engine {
             let _ = engine.load_plugins();
+            let _ = engine.trigger_event("on_startup", String::new());
         }
         state.plugin_engine = plugin_engine;
 
@@ -970,9 +971,13 @@ impl AppState {
                 self.preview_cache = None;
                 self.git_ctx = git_ctx;
 
-                self.record_navigation(path);
+                self.record_navigation(path.clone());
                 self.save_active_tab();
                 self.reset_selection_timeout();
+
+                if let Some(ref engine) = self.plugin_engine {
+                    let _ = engine.trigger_event("on_enter", path.to_string_lossy().to_string());
+                }
             }
         }
     }
@@ -996,9 +1001,13 @@ impl AppState {
             self.preview_cache = None;
             self.git_ctx = git_ctx;
 
-            self.record_navigation(path);
+            self.record_navigation(path.clone());
             self.save_active_tab();
             self.reset_selection_timeout();
+
+            if let Some(ref engine) = self.plugin_engine {
+                let _ = engine.trigger_event("on_enter", path.to_string_lossy().to_string());
+            }
         }
     }
 
@@ -1020,6 +1029,11 @@ impl AppState {
 
     pub fn reset_selection_timeout(&mut self) {
         self.last_selection_time = std::time::Instant::now();
+        if let Some(item) = self.navigation.current_selection() {
+            if let Some(ref engine) = self.plugin_engine {
+                let _ = engine.trigger_event("on_file_select", item.path.to_string_lossy().to_string());
+            }
+        }
     }
 
     /// Load the specified tab index state values into the AppState active fields.
@@ -1037,6 +1051,10 @@ impl AppState {
             self.active_tab = index;
             *self.last_rendered_image.lock().unwrap() = None;
             self.reset_selection_timeout();
+
+            if let Some(ref engine) = self.plugin_engine {
+                let _ = engine.trigger_event("on_tab_change", (index + 1).to_string());
+            }
         }
     }
 
@@ -1197,9 +1215,13 @@ impl AppState {
         self.preview_cache = None;
         self.git_ctx = git_ctx;
 
-        self.record_navigation(path);
+        self.record_navigation(path.clone());
         self.save_active_tab();
         self.reset_selection_timeout();
+
+        if let Some(ref engine) = self.plugin_engine {
+            let _ = engine.trigger_event("on_enter", path.to_string_lossy().to_string());
+        }
     }
 
     pub fn execute_plugin_command(&mut self, cmd: crate::plugin::commands::PluginCommand) {
