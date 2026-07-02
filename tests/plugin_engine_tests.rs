@@ -184,3 +184,77 @@ fn test_plugin_state_queries() {
     assert_eq!(parts[3], root.to_string_lossy().as_ref());
 }
 
+#[test]
+fn test_plugin_action_dispatch() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+
+    // Create a target navigation path
+    let target_dir = root.join("target_dir");
+    fs::create_dir_all(&target_dir).unwrap();
+
+    let plugin_dir = dir.path().join("my-plugin");
+    fs::create_dir_all(&plugin_dir).unwrap();
+
+    let mut toml_file = File::create(plugin_dir.join("plugin.toml")).unwrap();
+    write!(
+        toml_file,
+        r#"
+        name = "my-plugin"
+        version = "0.1.0"
+        author = "Developer"
+        main = "init.lua"
+    "#
+    )
+    .unwrap();
+
+    let mut lua_file = File::create(plugin_dir.join("init.lua")).unwrap();
+    write!(
+        lua_file,
+        r#"
+        ascope.on("dispatch_actions", function(target_path)
+            ascope.navigate(target_path)
+            ascope.open_tab(target_path)
+            ascope.notify("Hello from plugin", "info")
+            return "ok"
+        end)
+    "#
+    )
+    .unwrap();
+
+    // Instantiate AppState
+    let mut state = ascope::app::AppState::new(root.clone());
+
+    // Copy the plugin to config plugins directory
+    let config_dir = root.join(".config/ascope/plugins");
+    fs::create_dir_all(&config_dir).unwrap();
+    let dest_plugin = config_dir.join("my-plugin");
+    fs::create_dir_all(&dest_plugin).unwrap();
+    fs::copy(
+        plugin_dir.join("plugin.toml"),
+        dest_plugin.join("plugin.toml"),
+    )
+    .unwrap();
+    fs::copy(plugin_dir.join("init.lua"), dest_plugin.join("init.lua")).unwrap();
+
+    let mut engine = PluginEngine::new(config_dir).unwrap();
+    engine.load_plugins().unwrap();
+
+    ascope::plugin::engine::set_current_app_state(&mut state as *mut ascope::app::AppState);
+    let res = engine
+        .trigger_event("dispatch_actions", target_dir.to_string_lossy().to_string())
+        .unwrap();
+    ascope::plugin::engine::clear_current_app_state();
+
+    assert_eq!(res, vec!["ok".to_string()]);
+    // Check navigation happened
+    assert_eq!(state.current_path, target_dir);
+    // Check tabs count
+    assert_eq!(state.tabs.len(), 2);
+    // Check notification message
+    assert!(state.notification.is_some());
+    let (msg, _) = state.notification.unwrap();
+    assert_eq!(msg, "[INFO] Hello from plugin");
+}
+
+

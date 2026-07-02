@@ -1047,6 +1047,20 @@ impl AppState {
         self.load_tab(new_idx);
     }
 
+    /// Close the tab at a specific index. Reject if it is the last tab or index out of range.
+    pub fn close_tab_at(&mut self, index: usize) {
+        if self.tabs.len() <= 1 || index >= self.tabs.len() {
+            return;
+        }
+        self.tabs.remove(index);
+        let new_idx = if self.active_tab >= self.tabs.len() {
+            self.tabs.len() - 1
+        } else {
+            self.active_tab
+        };
+        self.load_tab(new_idx);
+    }
+
     /// Cycle to the next tab.
     pub fn next_tab(&mut self) {
         if self.tabs.len() <= 1 {
