@@ -44,6 +44,7 @@ where
 pub struct PluginEngine {
     lua: Lua,
     plugin_dir: PathBuf,
+    pub active_modal_callback: std::cell::RefCell<Option<mlua::RegistryKey>>,
 }
 
 impl PluginEngine {
@@ -267,9 +268,47 @@ impl PluginEngine {
         })?;
         ascope_api.set("notify", notify_fn)?;
 
+        let open_modal_fn = lua.create_function(|lua, opts: Table| {
+            let title: String = opts.get("title").unwrap_or_else(|_| "Overlay".to_string());
+            let items_table: Table = opts.get("items")?;
+            let mut items = Vec::new();
+            let len = items_table.len()?;
+            for i in 1..=len {
+                let item_tbl: Table = items_table.get(i)?;
+                let label: String = item_tbl.get("label")?;
+                let value: String = item_tbl.get("value")?;
+                items.push(crate::app::PluginOverlayItem { label, value });
+            }
+
+            let on_select: Function = opts.get("on_select")?;
+            let key = lua.create_registry_value(on_select)?;
+
+            with_app_state_mut(|state| {
+                state.modal_mode = crate::app::ModalMode::PluginOverlay;
+                state.plugin_modal_title = title;
+                state.plugin_modal_items = items.clone();
+                state.plugin_modal_filtered_items = items;
+                state.plugin_modal_input.clear();
+                state.plugin_modal_selected_index = 0;
+            });
+
+            with_app_state_mut(|state| {
+                if let Some(ref mut engine) = state.plugin_engine {
+                    *engine.active_modal_callback.borrow_mut() = Some(key);
+                }
+            });
+
+            Ok(())
+        })?;
+        ascope_api.set("open_modal", open_modal_fn)?;
+
         lua.globals().set("ascope", ascope_api)?;
 
-        Ok(Self { lua, plugin_dir })
+        Ok(Self {
+            lua,
+            plugin_dir,
+            active_modal_callback: std::cell::RefCell::new(None),
+        })
     }
 
     pub fn load_plugins(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -338,5 +377,25 @@ impl PluginEngine {
             }
         }
         Ok(results)
+    }
+
+    pub fn trigger_modal_select(&self, value: String, mode: String) -> Result<(), mlua::Error> {
+        let key_opt = self.active_modal_callback.borrow_mut().take();
+        if let Some(key) = key_opt {
+            let func: Function = self.lua.registry_value(&key)?;
+            let tbl = self.lua.create_table()?;
+            tbl.set("value", value)?;
+            let _res: Value = func.call::<_, Value>((tbl, mode))?;
+            self.lua.remove_registry_value(key)?;
+        }
+        Ok(())
+    }
+
+    pub fn clear_modal_callback(&self) -> Result<(), mlua::Error> {
+        let key_opt = self.active_modal_callback.borrow_mut().take();
+        if let Some(key) = key_opt {
+            self.lua.remove_registry_value(key)?;
+        }
+        Ok(())
     }
 }

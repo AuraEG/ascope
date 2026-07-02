@@ -166,7 +166,71 @@ fn event_loop(
                         _ => {}
                     }
                 } else if state.modal_mode != ascope::app::ModalMode::None {
-                    if state.modal_mode == ascope::app::ModalMode::CommandPalette {
+                    if state.modal_mode == ascope::app::ModalMode::PluginOverlay {
+                        match key.code {
+                            KeyCode::Esc => {
+                                state.modal_mode = ascope::app::ModalMode::None;
+                                if let Some(ref engine) = state.plugin_engine {
+                                    let _ = engine.clear_modal_callback();
+                                }
+                            }
+                            KeyCode::Up | KeyCode::Char('p')
+                                if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                            {
+                                let len = state.plugin_modal_filtered_items.len();
+                                if len > 0 {
+                                    state.plugin_modal_selected_index =
+                                        (state.plugin_modal_selected_index + len - 1) % len;
+                                }
+                            }
+                            KeyCode::Down | KeyCode::Char('n')
+                                if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                            {
+                                let len = state.plugin_modal_filtered_items.len();
+                                if len > 0 {
+                                    state.plugin_modal_selected_index =
+                                        (state.plugin_modal_selected_index + 1) % len;
+                                }
+                            }
+                            KeyCode::Up => {
+                                let len = state.plugin_modal_filtered_items.len();
+                                if len > 0 {
+                                    state.plugin_modal_selected_index =
+                                        (state.plugin_modal_selected_index + len - 1) % len;
+                                }
+                            }
+                            KeyCode::Down => {
+                                let len = state.plugin_modal_filtered_items.len();
+                                if len > 0 {
+                                    state.plugin_modal_selected_index =
+                                        (state.plugin_modal_selected_index + 1) % len;
+                                }
+                            }
+                            KeyCode::Enter => {
+                                let idx = state.plugin_modal_selected_index;
+                                if let Some(item) = state.plugin_modal_filtered_items.get(idx).cloned() {
+                                    state.modal_mode = ascope::app::ModalMode::None;
+                                    if let Some(ref engine) = state.plugin_engine {
+                                        let _ = engine.trigger_modal_select(item.value, "select".to_string());
+                                    }
+                                } else {
+                                    state.modal_mode = ascope::app::ModalMode::None;
+                                    if let Some(ref engine) = state.plugin_engine {
+                                        let _ = engine.clear_modal_callback();
+                                    }
+                                }
+                            }
+                            KeyCode::Backspace => {
+                                state.plugin_modal_input.pop();
+                                state.update_plugin_modal_filtering();
+                            }
+                            KeyCode::Char(c) => {
+                                state.plugin_modal_input.push(c);
+                                state.update_plugin_modal_filtering();
+                            }
+                            _ => {}
+                        }
+                    } else if state.modal_mode == ascope::app::ModalMode::CommandPalette {
                         if state.command_palette_focused {
                             match key.code {
                                 KeyCode::Esc => {
