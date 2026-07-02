@@ -298,8 +298,6 @@ impl AppState {
             config.save();
         }
 
-
-
         let initial_tab = Tab {
             current_path: root.clone(),
             active_stats: Arc::clone(&active_stats),
@@ -1033,7 +1031,8 @@ impl AppState {
         self.last_selection_time = std::time::Instant::now();
         if let Some(item) = self.navigation.current_selection() {
             if let Some(ref engine) = self.plugin_engine {
-                let _ = engine.trigger_event("on_file_select", item.path.to_string_lossy().to_string());
+                let _ =
+                    engine.trigger_event("on_file_select", item.path.to_string_lossy().to_string());
             }
         }
     }
@@ -1714,7 +1713,8 @@ impl AppState {
         if query.is_empty() {
             self.plugin_modal_filtered_items = self.plugin_modal_items.clone();
         } else {
-            self.plugin_modal_filtered_items = self.plugin_modal_items
+            self.plugin_modal_filtered_items = self
+                .plugin_modal_items
                 .iter()
                 .filter(|item| item.label.to_lowercase().contains(&query))
                 .cloned()

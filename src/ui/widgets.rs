@@ -2425,9 +2425,10 @@ fn render_plugin_overlay(f: &mut Frame, state: &AppState) {
                 Style::default().fg(Color::White)
             };
 
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("  {} ", result.label), text_style),
-            ]))
+            ListItem::new(Line::from(vec![Span::styled(
+                format!("  {} ", result.label),
+                text_style,
+            )]))
         })
         .collect();
 
