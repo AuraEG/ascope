@@ -120,6 +120,7 @@ fn event_loop(
             state.poll_preview_updates();
         }
         state.poll_search_updates();
+        state.poll_shell_updates();
         terminal.draw(|f| ui::widgets::render_dashboard(f, &state))?;
 
         match events.next()? {

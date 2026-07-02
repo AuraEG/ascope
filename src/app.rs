@@ -34,6 +34,13 @@ pub struct PluginOverlayItem {
     pub value: String,
 }
 
+pub struct ShellResult {
+    pub callback_key: mlua::RegistryKey,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalMode {
     None,
@@ -185,6 +192,8 @@ pub struct AppState {
     pub plugin_modal_filtered_items: Vec<PluginOverlayItem>,
     pub plugin_modal_input: String,
     pub plugin_modal_selected_index: usize,
+    pub shell_result_tx: std::sync::mpsc::Sender<ShellResult>,
+    pub shell_result_rx: std::sync::mpsc::Receiver<ShellResult>,
 }
 
 #[derive(Debug, Clone)]
@@ -309,6 +318,7 @@ impl AppState {
 
         let (rg_query_tx, rg_query_rx) = std::sync::mpsc::channel();
         let (rg_match_tx, rg_match_rx) = std::sync::mpsc::channel();
+        let (shell_result_tx, shell_result_rx) = std::sync::mpsc::channel();
 
         std::thread::spawn(move || {
             crate::search::ripgrep::spawn_rg_worker(rg_query_rx, rg_match_tx);
@@ -513,6 +523,8 @@ impl AppState {
             plugin_modal_filtered_items: Vec::new(),
             plugin_modal_input: String::new(),
             plugin_modal_selected_index: 0,
+            shell_result_tx,
+            shell_result_rx,
         };
 
         // Discovered project commands
@@ -657,6 +669,19 @@ impl AppState {
             if Some(&path) == selected.as_ref() && current_query == query {
                 self.preview_cache = Some((path, query, None, lines));
                 *self.last_rendered_image.lock().unwrap() = cache;
+            }
+        }
+    }
+
+    pub fn poll_shell_updates(&mut self) {
+        while let Ok(result) = self.shell_result_rx.try_recv() {
+            if let Some(ref mut engine) = self.plugin_engine {
+                let _ = engine.execute_shell_callback(
+                    result.callback_key,
+                    result.stdout,
+                    result.stderr,
+                    result.exit_code,
+                );
             }
         }
     }

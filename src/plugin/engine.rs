@@ -302,6 +302,53 @@ impl PluginEngine {
         })?;
         ascope_api.set("open_modal", open_modal_fn)?;
 
+        let exec_shell_fn = lua.create_function(|lua, (cmd, args, cb): (String, Table, Function)| {
+            let mut args_vec = Vec::new();
+            let len = args.len()?;
+            for i in 1..=len {
+                let val: String = args.get(i)?;
+                args_vec.push(val);
+            }
+
+            let key = lua.create_registry_value(cb)?;
+
+            let tx_opt = with_app_state(|state| {
+                state.shell_result_tx.clone()
+            });
+
+            if let Some(tx) = tx_opt {
+                std::thread::spawn(move || {
+                    let mut command = std::process::Command::new(&cmd);
+                    command.args(&args_vec);
+                    command.stdout(std::process::Stdio::piped());
+                    command.stderr(std::process::Stdio::piped());
+
+                    let output_res = command.output();
+                    let (stdout, stderr, exit_code) = match output_res {
+                        Ok(output) => {
+                            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                            let exit_code = output.status.code();
+                            (stdout, stderr, exit_code)
+                        }
+                        Err(e) => {
+                            (String::new(), format!("Failed to execute command: {e}"), None)
+                        }
+                    };
+
+                    let _ = tx.send(crate::app::ShellResult {
+                        callback_key: key,
+                        stdout,
+                        stderr,
+                        exit_code,
+                    });
+                });
+            }
+
+            Ok(())
+        })?;
+        ascope_api.set("exec_shell", exec_shell_fn)?;
+
         lua.globals().set("ascope", ascope_api)?;
 
         Ok(Self {
@@ -396,6 +443,19 @@ impl PluginEngine {
         if let Some(key) = key_opt {
             self.lua.remove_registry_value(key)?;
         }
+        Ok(())
+    }
+
+    pub fn execute_shell_callback(
+        &self,
+        key: mlua::RegistryKey,
+        stdout: String,
+        stderr: String,
+        exit_code: Option<i32>,
+    ) -> Result<(), mlua::Error> {
+        let func: Function = self.lua.registry_value(&key)?;
+        let _res: Value = func.call::<_, Value>((stdout, stderr, exit_code))?;
+        self.lua.remove_registry_value(key)?;
         Ok(())
     }
 }

@@ -346,5 +346,84 @@ fn test_plugin_modal_overlay() {
     ascope::plugin::engine::clear_current_app_state();
 }
 
+#[test]
+fn test_plugin_exec_shell() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+
+    let plugin_dir = dir.path().join("my-plugin");
+    fs::create_dir_all(&plugin_dir).unwrap();
+
+    let mut toml_file = File::create(plugin_dir.join("plugin.toml")).unwrap();
+    write!(
+        toml_file,
+        r#"
+        name = "my-plugin"
+        version = "0.1.0"
+        author = "Developer"
+        main = "init.lua"
+    "#
+    )
+    .unwrap();
+
+    let mut lua_file = File::create(plugin_dir.join("init.lua")).unwrap();
+    write!(
+        lua_file,
+        "{}",
+        r#"
+        ascope.on("trigger_exec", function(payload)
+            ascope.exec_shell("echo", {"hello_world"}, function(stdout, stderr, exit_code)
+                ascope.notify("output: " .. stdout .. " exit: " .. tostring(exit_code), "info")
+            end)
+            return "exec_called"
+        end)
+    "#
+    )
+    .unwrap();
+
+    // Instantiate AppState
+    let mut state = ascope::app::AppState::new(root.clone());
+
+    // Copy the plugin to config plugins directory
+    let config_dir = root.join(".config/ascope/plugins");
+    fs::create_dir_all(&config_dir).unwrap();
+    let dest_plugin = config_dir.join("my-plugin");
+    fs::create_dir_all(&dest_plugin).unwrap();
+    fs::copy(
+        plugin_dir.join("plugin.toml"),
+        dest_plugin.join("plugin.toml"),
+    )
+    .unwrap();
+    fs::copy(plugin_dir.join("init.lua"), dest_plugin.join("init.lua")).unwrap();
+
+    let mut engine = PluginEngine::new(config_dir).unwrap();
+    engine.load_plugins().unwrap();
+
+    ascope::plugin::engine::set_current_app_state(&mut state as *mut ascope::app::AppState);
+    state.plugin_engine = Some(engine);
+
+    // Trigger the exec event
+    let res = state.plugin_engine.as_ref().unwrap()
+        .trigger_event("trigger_exec", String::new())
+        .unwrap();
+
+    assert_eq!(res, vec!["exec_called".to_string()]);
+
+    // Wait a brief moment or poll updates directly until we receive the message
+    let start_time = std::time::Instant::now();
+    while state.notification.is_none() && start_time.elapsed().as_secs() < 5 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        state.poll_shell_updates();
+    }
+
+    assert!(state.notification.is_some());
+    let (msg, _) = state.notification.unwrap();
+    assert!(msg.contains("hello_world"));
+    assert!(msg.contains("exit: 0"));
+
+    ascope::plugin::engine::clear_current_app_state();
+}
+
+
 
 
