@@ -133,7 +133,91 @@ fn event_loop(
                 }
             }
             ui::event::AppEvent::Key(key) => {
-                if state.show_help {
+                let mut intercepted = false;
+                if state.modal_mode == ascope::app::ModalMode::None && !state.rename_mode {
+                    if let Some(ref engine) = state.plugin_engine {
+                        let current_char = match key.code {
+                            KeyCode::Char(c) => Some(c),
+                            _ => None,
+                        };
+
+                        if let Some(c) = current_char {
+                            let has_ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
+                            let has_alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
+
+                            let key_str = if has_ctrl {
+                                format!("ctrl-{}", c)
+                            } else if has_alt {
+                                format!("alt-{}", c)
+                            } else {
+                                c.to_string()
+                            };
+
+                            let proposed_seq = if state.pending_key_sequence.is_empty() {
+                                key_str.clone()
+                            } else {
+                                format!("{} {}", state.pending_key_sequence, key_str)
+                            };
+
+                            let mut complete_match = None;
+                            let mut prefix_match = false;
+
+                            for kb in &engine.keybindings {
+                                let kb_key_normalized = kb.key.trim().to_lowercase();
+                                let proposed_seq_normalized = proposed_seq.trim().to_lowercase();
+
+                                if kb_key_normalized == proposed_seq_normalized {
+                                    complete_match = Some(kb.event.clone());
+                                } else if kb_key_normalized.starts_with(&format!("{} ", proposed_seq_normalized))
+                                    || kb_key_normalized.starts_with(&proposed_seq_normalized)
+                                {
+                                    prefix_match = true;
+                                }
+                            }
+
+                            if let Some(event) = complete_match {
+                                let _ = engine.trigger_event(&event, String::new());
+                                state.pending_key_sequence.clear();
+                                intercepted = true;
+                            } else if prefix_match {
+                                state.pending_key_sequence = proposed_seq;
+                                intercepted = true;
+                            } else {
+                                state.pending_key_sequence.clear();
+
+                                let fresh_seq = key_str;
+                                let fresh_seq_normalized = fresh_seq.trim().to_lowercase();
+                                let mut fresh_complete_match = None;
+                                let mut fresh_prefix_match = false;
+
+                                for kb in &engine.keybindings {
+                                    let kb_key_normalized = kb.key.trim().to_lowercase();
+                                    if kb_key_normalized == fresh_seq_normalized {
+                                        fresh_complete_match = Some(kb.event.clone());
+                                    } else if kb_key_normalized.starts_with(&format!("{} ", fresh_seq_normalized))
+                                        || kb_key_normalized.starts_with(&fresh_seq_normalized)
+                                    {
+                                        fresh_prefix_match = true;
+                                    }
+                                }
+
+                                if let Some(event) = fresh_complete_match {
+                                    let _ = engine.trigger_event(&event, String::new());
+                                    intercepted = true;
+                                } else if fresh_prefix_match {
+                                    state.pending_key_sequence = fresh_seq;
+                                    intercepted = true;
+                                }
+                            }
+                        } else {
+                            state.pending_key_sequence.clear();
+                        }
+                    }
+                }
+
+                if intercepted {
+                    // Intercepted by plugin keybinding, do nothing
+                } else if state.show_help {
                     match key.code {
                         KeyCode::Esc | KeyCode::Char('?') => {
                             state.show_help = false;

@@ -194,6 +194,7 @@ pub struct AppState {
     pub plugin_modal_selected_index: usize,
     pub shell_result_tx: std::sync::mpsc::Sender<ShellResult>,
     pub shell_result_rx: std::sync::mpsc::Receiver<ShellResult>,
+    pub pending_key_sequence: String,
 }
 
 #[derive(Debug, Clone)]
@@ -525,6 +526,7 @@ impl AppState {
             plugin_modal_selected_index: 0,
             shell_result_tx,
             shell_result_rx,
+            pending_key_sequence: String::new(),
         };
 
         // Discovered project commands
