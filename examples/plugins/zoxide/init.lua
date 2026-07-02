@@ -21,7 +21,21 @@ function zoxide.query()
             title = "󰆛 Zoxide — Jump to...",
             items = items,
             on_select = function(item, mode)
-                ascope.navigate(item.value)
+                local actions = {
+                    { label = "[c] Navigate here", value = "current" },
+                    { label = "[t] Open in new tab", value = "tab" }
+                }
+                ascope.open_modal({
+                    title = "Action: " .. item.value,
+                    items = actions,
+                    on_select = function(act, m)
+                        if act.value == "tab" then
+                            ascope.open_tab(item.value)
+                        else
+                            ascope.navigate(item.value)
+                        end
+                    end
+                })
             end
         })
     end)
