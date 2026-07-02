@@ -529,6 +529,95 @@ fn test_plugin_lifecycle_events() {
     ascope::plugin::engine::clear_current_app_state();
 }
 
+#[test]
+fn test_plugin_keybindings_manifest() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+
+    let plugin_dir = dir.path().join("my-plugin");
+    fs::create_dir_all(&plugin_dir).unwrap();
+
+    let mut toml_file = File::create(plugin_dir.join("plugin.toml")).unwrap();
+    write!(
+        toml_file,
+        r#"
+        name = "my-plugin"
+        version = "0.1.0"
+        author = "Developer"
+        main = "init.lua"
+
+        [[keybindings]]
+        key = "ctrl-t"
+        event = "open_tmux"
+
+        [[keybindings]]
+        key = "g z"
+        event = "open_zoxide"
+    "#
+    )
+    .unwrap();
+
+    let mut lua_file = File::create(plugin_dir.join("init.lua")).unwrap();
+    write!(
+        lua_file,
+        "{}",
+        r#"
+        local triggered = {}
+        ascope.on("open_tmux", function()
+            table.insert(triggered, "tmux")
+        end)
+        ascope.on("open_zoxide", function()
+            table.insert(triggered, "zoxide")
+        end)
+        ascope.on("get_triggered", function()
+            return table.concat(triggered, ",")
+        end)
+    "#
+    )
+    .unwrap();
+
+    // Instantiate AppState
+    let mut state = ascope::app::AppState::new(root.clone());
+
+    // Copy the plugin to config plugins directory
+    let config_dir = root.join(".config/ascope/plugins");
+    fs::create_dir_all(&config_dir).unwrap();
+    let dest_plugin = config_dir.join("my-plugin");
+    fs::create_dir_all(&dest_plugin).unwrap();
+    fs::copy(
+        plugin_dir.join("plugin.toml"),
+        dest_plugin.join("plugin.toml"),
+    )
+    .unwrap();
+    fs::copy(plugin_dir.join("init.lua"), dest_plugin.join("init.lua")).unwrap();
+
+    let mut engine = PluginEngine::new(config_dir).unwrap();
+    engine.load_plugins().unwrap();
+
+    // Verify keybindings are correctly parsed
+    assert_eq!(engine.keybindings.len(), 2);
+    assert_eq!(engine.keybindings[0].key, "ctrl-t");
+    assert_eq!(engine.keybindings[0].event, "open_tmux");
+    assert_eq!(engine.keybindings[1].key, "g z");
+    assert_eq!(engine.keybindings[1].event, "open_zoxide");
+
+    ascope::plugin::engine::set_current_app_state(&mut state as *mut ascope::app::AppState);
+    state.plugin_engine = Some(engine);
+
+    // Trigger keybindings directly
+    state.plugin_engine.as_ref().unwrap().trigger_event("open_tmux", String::new()).unwrap();
+    state.plugin_engine.as_ref().unwrap().trigger_event("open_zoxide", String::new()).unwrap();
+
+    let res = state.plugin_engine.as_ref().unwrap()
+        .trigger_event("get_triggered", String::new())
+        .unwrap();
+
+    assert_eq!(res.len(), 1);
+    assert_eq!(res[0], "tmux,zoxide");
+
+    ascope::plugin::engine::clear_current_app_state();
+}
+
 
 
 

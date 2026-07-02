@@ -45,6 +45,7 @@ pub struct PluginEngine {
     lua: Lua,
     plugin_dir: PathBuf,
     pub active_modal_callback: std::cell::RefCell<Option<mlua::RegistryKey>>,
+    pub keybindings: Vec<crate::plugin::manifest::Keybinding>,
 }
 
 impl PluginEngine {
@@ -355,6 +356,7 @@ impl PluginEngine {
             lua,
             plugin_dir,
             active_modal_callback: std::cell::RefCell::new(None),
+            keybindings: Vec::new(),
         })
     }
 
@@ -397,6 +399,7 @@ impl PluginEngine {
                 if manifest_path.exists() {
                     let manifest_content = fs::read_to_string(&manifest_path)?;
                     let manifest: PluginManifest = toml::from_str(&manifest_content)?;
+                    self.keybindings.extend(manifest.keybindings.clone());
                     let script_path = path.join(&manifest.main);
                     if script_path.exists() {
                         let script_content = fs::read_to_string(&script_path)?;
