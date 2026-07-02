@@ -28,6 +28,19 @@ pub enum SortMode {
     MtimeDesc,
 }
 
+#[derive(Debug, Clone)]
+pub struct PluginOverlayItem {
+    pub label: String,
+    pub value: String,
+}
+
+pub struct ShellResult {
+    pub callback_key: mlua::RegistryKey,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalMode {
     None,
@@ -38,6 +51,7 @@ pub enum ModalMode {
     SearchOverlay,
     CommandPalette,
     SizeDetails,
+    PluginOverlay,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +187,14 @@ pub struct AppState {
     pub size_popup_stats: Option<Arc<Mutex<PathStats>>>,
     pub size_popup_progress: Option<Arc<Mutex<ScanProgress>>>,
     pub right_pane_dashboard_cache: std::cell::RefCell<Option<(PathBuf, FolderDashboardSummary)>>,
+    pub plugin_modal_title: String,
+    pub plugin_modal_items: Vec<PluginOverlayItem>,
+    pub plugin_modal_filtered_items: Vec<PluginOverlayItem>,
+    pub plugin_modal_input: String,
+    pub plugin_modal_selected_index: usize,
+    pub shell_result_tx: std::sync::mpsc::Sender<ShellResult>,
+    pub shell_result_rx: std::sync::mpsc::Receiver<ShellResult>,
+    pub pending_key_sequence: String,
 }
 
 #[derive(Debug, Clone)]
@@ -276,12 +298,6 @@ impl AppState {
             config.save();
         }
 
-        let mut plugin_engine =
-            crate::plugin::engine::PluginEngine::new(root.join(".config/ascope/plugins")).ok();
-        if let Some(ref mut engine) = plugin_engine {
-            let _ = engine.load_plugins();
-        }
-
         let initial_tab = Tab {
             current_path: root.clone(),
             active_stats: Arc::clone(&active_stats),
@@ -301,6 +317,7 @@ impl AppState {
 
         let (rg_query_tx, rg_query_rx) = std::sync::mpsc::channel();
         let (rg_match_tx, rg_match_rx) = std::sync::mpsc::channel();
+        let (shell_result_tx, shell_result_rx) = std::sync::mpsc::channel();
 
         std::thread::spawn(move || {
             crate::search::ripgrep::spawn_rg_worker(rg_query_rx, rg_match_tx);
@@ -480,7 +497,7 @@ impl AppState {
             delete_targets: Vec::new(),
             show_help: false,
             help_selected_index: 0,
-            plugin_engine,
+            plugin_engine: None,
             last_selection_time: std::time::Instant::now(),
             search_overlay_mode: SearchOverlayMode::FuzzyFiles,
             search_overlay_input: String::new(),
@@ -500,6 +517,14 @@ impl AppState {
             size_popup_stats: None,
             size_popup_progress: None,
             right_pane_dashboard_cache: std::cell::RefCell::new(None),
+            plugin_modal_title: String::new(),
+            plugin_modal_items: Vec::new(),
+            plugin_modal_filtered_items: Vec::new(),
+            plugin_modal_input: String::new(),
+            plugin_modal_selected_index: 0,
+            shell_result_tx,
+            shell_result_rx,
+            pending_key_sequence: String::new(),
         };
 
         // Discovered project commands
@@ -522,6 +547,16 @@ impl AppState {
 
         state.command_palette_candidates = candidates.clone();
         state.command_palette_results = candidates;
+
+        // Set the thread-local state pointer during plugin loading
+        crate::plugin::engine::set_current_app_state(&mut state as *mut Self);
+        let mut plugin_engine =
+            crate::plugin::engine::PluginEngine::new(root.join(".config/ascope/plugins")).ok();
+        if let Some(ref mut engine) = plugin_engine {
+            let _ = engine.load_plugins();
+            let _ = engine.trigger_event("on_startup", String::new());
+        }
+        state.plugin_engine = plugin_engine;
 
         state
     }
@@ -635,6 +670,19 @@ impl AppState {
             if Some(&path) == selected.as_ref() && current_query == query {
                 self.preview_cache = Some((path, query, None, lines));
                 *self.last_rendered_image.lock().unwrap() = cache;
+            }
+        }
+    }
+
+    pub fn poll_shell_updates(&mut self) {
+        while let Ok(result) = self.shell_result_rx.try_recv() {
+            if let Some(ref mut engine) = self.plugin_engine {
+                let _ = engine.execute_shell_callback(
+                    result.callback_key,
+                    result.stdout,
+                    result.stderr,
+                    result.exit_code,
+                );
             }
         }
     }
@@ -923,9 +971,13 @@ impl AppState {
                 self.preview_cache = None;
                 self.git_ctx = git_ctx;
 
-                self.record_navigation(path);
+                self.record_navigation(path.clone());
                 self.save_active_tab();
                 self.reset_selection_timeout();
+
+                if let Some(ref engine) = self.plugin_engine {
+                    let _ = engine.trigger_event("on_enter", path.to_string_lossy().to_string());
+                }
             }
         }
     }
@@ -949,9 +1001,13 @@ impl AppState {
             self.preview_cache = None;
             self.git_ctx = git_ctx;
 
-            self.record_navigation(path);
+            self.record_navigation(path.clone());
             self.save_active_tab();
             self.reset_selection_timeout();
+
+            if let Some(ref engine) = self.plugin_engine {
+                let _ = engine.trigger_event("on_enter", path.to_string_lossy().to_string());
+            }
         }
     }
 
@@ -973,6 +1029,12 @@ impl AppState {
 
     pub fn reset_selection_timeout(&mut self) {
         self.last_selection_time = std::time::Instant::now();
+        if let Some(item) = self.navigation.current_selection() {
+            if let Some(ref engine) = self.plugin_engine {
+                let _ =
+                    engine.trigger_event("on_file_select", item.path.to_string_lossy().to_string());
+            }
+        }
     }
 
     /// Load the specified tab index state values into the AppState active fields.
@@ -990,6 +1052,10 @@ impl AppState {
             self.active_tab = index;
             *self.last_rendered_image.lock().unwrap() = None;
             self.reset_selection_timeout();
+
+            if let Some(ref engine) = self.plugin_engine {
+                let _ = engine.trigger_event("on_tab_change", (index + 1).to_string());
+            }
         }
     }
 
@@ -1034,6 +1100,20 @@ impl AppState {
             return;
         }
         self.tabs.remove(self.active_tab);
+        let new_idx = if self.active_tab >= self.tabs.len() {
+            self.tabs.len() - 1
+        } else {
+            self.active_tab
+        };
+        self.load_tab(new_idx);
+    }
+
+    /// Close the tab at a specific index. Reject if it is the last tab or index out of range.
+    pub fn close_tab_at(&mut self, index: usize) {
+        if self.tabs.len() <= 1 || index >= self.tabs.len() {
+            return;
+        }
+        self.tabs.remove(index);
         let new_idx = if self.active_tab >= self.tabs.len() {
             self.tabs.len() - 1
         } else {
@@ -1136,9 +1216,13 @@ impl AppState {
         self.preview_cache = None;
         self.git_ctx = git_ctx;
 
-        self.record_navigation(path);
+        self.record_navigation(path.clone());
         self.save_active_tab();
         self.reset_selection_timeout();
+
+        if let Some(ref engine) = self.plugin_engine {
+            let _ = engine.trigger_event("on_enter", path.to_string_lossy().to_string());
+        }
     }
 
     pub fn execute_plugin_command(&mut self, cmd: crate::plugin::commands::PluginCommand) {
@@ -1622,6 +1706,21 @@ impl AppState {
                     });
             }
         }
+    }
+
+    pub fn update_plugin_modal_filtering(&mut self) {
+        let query = self.plugin_modal_input.to_lowercase();
+        if query.is_empty() {
+            self.plugin_modal_filtered_items = self.plugin_modal_items.clone();
+        } else {
+            self.plugin_modal_filtered_items = self
+                .plugin_modal_items
+                .iter()
+                .filter(|item| item.label.to_lowercase().contains(&query))
+                .cloned()
+                .collect();
+        }
+        self.plugin_modal_selected_index = 0;
     }
 
     pub fn update_command_palette_results(&mut self) {

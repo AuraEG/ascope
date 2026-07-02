@@ -1,0 +1,8 @@
+name = "tmux-bookmark"
+version = "0.1.0"
+author = "AuraScope Team"
+main = "init.lua"
+
+[[keybindings]]
+key = "ctrl-t"
+event = "open_tmux_bookmark"
