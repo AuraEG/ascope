@@ -222,6 +222,51 @@ impl PluginEngine {
         })?;
         ascope_api.set("get_active_tab", get_active_tab_fn)?;
 
+        let navigate_fn = lua.create_function(|_, path: String| {
+            let path_buf = PathBuf::from(path);
+            with_app_state_mut(|state| {
+                state.jump_to_path(path_buf);
+            });
+            Ok(())
+        })?;
+        ascope_api.set("navigate", navigate_fn)?;
+
+        let open_tab_fn = lua.create_function(|_, path: String| {
+            let path_buf = PathBuf::from(path);
+            with_app_state_mut(|state| {
+                state.open_tab(path_buf);
+            });
+            Ok(())
+        })?;
+        ascope_api.set("open_tab", open_tab_fn)?;
+
+        let close_tab_fn = lua.create_function(|_, id: Option<usize>| {
+            with_app_state_mut(|state| {
+                if let Some(id_val) = id {
+                    if id_val > 0 {
+                        state.close_tab_at(id_val - 1);
+                    }
+                } else {
+                    state.close_tab();
+                }
+            });
+            Ok(())
+        })?;
+        ascope_api.set("close_tab", close_tab_fn)?;
+
+        let notify_fn = lua.create_function(|_, (msg, level): (String, Option<String>)| {
+            let formatted = if let Some(lvl) = level {
+                format!("[{}] {}", lvl.to_uppercase(), msg)
+            } else {
+                msg
+            };
+            with_app_state_mut(|state| {
+                state.notification = Some((formatted, std::time::Instant::now()));
+            });
+            Ok(())
+        })?;
+        ascope_api.set("notify", notify_fn)?;
+
         lua.globals().set("ascope", ascope_api)?;
 
         Ok(Self { lua, plugin_dir })
