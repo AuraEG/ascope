@@ -15,4 +15,6 @@ pub struct PluginManifest {
     pub main: String,
     #[serde(default)]
     pub keybindings: Vec<Keybinding>,
+    #[serde(default)]
+    pub config: toml::Table,
 }

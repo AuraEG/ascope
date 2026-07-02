@@ -136,6 +136,7 @@ fn event_loop(
                 let mut intercepted = false;
                 if state.modal_mode == ascope::app::ModalMode::None && !state.rename_mode {
                     if let Some(ref engine) = state.plugin_engine {
+                        let dkb_guard = engine.dynamic_keybindings.borrow();
                         let current_char = match key.code {
                             KeyCode::Char(c) => Some(c),
                             _ => None,
@@ -159,6 +160,11 @@ fn event_loop(
                                 format!("{} {}", state.pending_key_sequence, key_str)
                             };
 
+                            enum ActionOrCallback<'a> {
+                                Event(String),
+                                Callback(&'a mlua::RegistryKey),
+                            }
+
                             let mut complete_match = None;
                             let mut prefix_match = false;
 
@@ -167,7 +173,7 @@ fn event_loop(
                                 let proposed_seq_normalized = proposed_seq.trim().to_lowercase();
 
                                 if kb_key_normalized == proposed_seq_normalized {
-                                    complete_match = Some(kb.event.clone());
+                                    complete_match = Some(ActionOrCallback::Event(kb.event.clone()));
                                 } else if kb_key_normalized.starts_with(&format!("{} ", proposed_seq_normalized))
                                     || kb_key_normalized.starts_with(&proposed_seq_normalized)
                                 {
@@ -175,8 +181,28 @@ fn event_loop(
                                 }
                             }
 
-                            if let Some(event) = complete_match {
-                                let _ = engine.trigger_event(&event, String::new());
+                            for dkb in &*dkb_guard {
+                                let kb_key_normalized = dkb.key.trim().to_lowercase();
+                                let proposed_seq_normalized = proposed_seq.trim().to_lowercase();
+
+                                if kb_key_normalized == proposed_seq_normalized {
+                                    complete_match = Some(ActionOrCallback::Callback(&dkb.callback));
+                                } else if kb_key_normalized.starts_with(&format!("{} ", proposed_seq_normalized))
+                                    || kb_key_normalized.starts_with(&proposed_seq_normalized)
+                                {
+                                    prefix_match = true;
+                                }
+                            }
+
+                            if let Some(act) = complete_match {
+                                match act {
+                                    ActionOrCallback::Event(event) => {
+                                        let _ = engine.trigger_event(&event, String::new());
+                                    }
+                                    ActionOrCallback::Callback(callback_key) => {
+                                        let _ = engine.execute_key_callback(callback_key);
+                                    }
+                                }
                                 state.pending_key_sequence.clear();
                                 intercepted = true;
                             } else if prefix_match {
@@ -193,7 +219,7 @@ fn event_loop(
                                 for kb in &engine.keybindings {
                                     let kb_key_normalized = kb.key.trim().to_lowercase();
                                     if kb_key_normalized == fresh_seq_normalized {
-                                        fresh_complete_match = Some(kb.event.clone());
+                                        fresh_complete_match = Some(ActionOrCallback::Event(kb.event.clone()));
                                     } else if kb_key_normalized.starts_with(&format!("{} ", fresh_seq_normalized))
                                         || kb_key_normalized.starts_with(&fresh_seq_normalized)
                                     {
@@ -201,8 +227,26 @@ fn event_loop(
                                     }
                                 }
 
-                                if let Some(event) = fresh_complete_match {
-                                    let _ = engine.trigger_event(&event, String::new());
+                                for dkb in &*dkb_guard {
+                                    let kb_key_normalized = dkb.key.trim().to_lowercase();
+                                    if kb_key_normalized == fresh_seq_normalized {
+                                        fresh_complete_match = Some(ActionOrCallback::Callback(&dkb.callback));
+                                    } else if kb_key_normalized.starts_with(&format!("{} ", fresh_seq_normalized))
+                                        || kb_key_normalized.starts_with(&fresh_seq_normalized)
+                                    {
+                                        fresh_prefix_match = true;
+                                    }
+                                }
+
+                                if let Some(act) = fresh_complete_match {
+                                    match act {
+                                        ActionOrCallback::Event(event) => {
+                                            let _ = engine.trigger_event(&event, String::new());
+                                        }
+                                        ActionOrCallback::Callback(callback_key) => {
+                                            let _ = engine.execute_key_callback(callback_key);
+                                        }
+                                    }
                                     intercepted = true;
                                 } else if fresh_prefix_match {
                                     state.pending_key_sequence = fresh_seq;

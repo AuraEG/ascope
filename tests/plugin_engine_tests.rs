@@ -618,6 +618,191 @@ fn test_plugin_keybindings_manifest() {
     ascope::plugin::engine::clear_current_app_state();
 }
 
+#[test]
+fn test_example_tmux_bookmark_loads() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+
+    // Copy the example plugin to our temporary directory to load it
+    let examples_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/plugins/tmux-bookmark");
+    
+    let config_dir = root.join(".config/ascope/plugins");
+    fs::create_dir_all(&config_dir).unwrap();
+    let dest_plugin = config_dir.join("tmux-bookmark");
+    fs::create_dir_all(&dest_plugin).unwrap();
+
+    fs::copy(
+        examples_dir.join("plugin.toml"),
+        dest_plugin.join("plugin.toml"),
+    )
+    .unwrap();
+    fs::copy(
+        examples_dir.join("init.lua"),
+        dest_plugin.join("init.lua"),
+    )
+    .unwrap();
+
+    let mut state = ascope::app::AppState::new(root.clone());
+    let mut engine = PluginEngine::new(config_dir).unwrap();
+    engine.load_plugins().unwrap();
+
+    // Verify keybindings parsed
+    assert_eq!(engine.keybindings.len(), 1);
+    assert_eq!(engine.keybindings[0].key, "ctrl-t");
+    assert_eq!(engine.keybindings[0].event, "open_tmux_bookmark");
+
+    ascope::plugin::engine::set_current_app_state(&mut state as *mut ascope::app::AppState);
+    state.plugin_engine = Some(engine);
+
+    // Verify trigger_event exists and runs without error
+    let res = state.plugin_engine.as_ref().unwrap()
+        .trigger_event("open_tmux_bookmark", String::new());
+    assert!(res.is_ok());
+
+    ascope::plugin::engine::clear_current_app_state();
+}
+
+#[test]
+fn test_plugin_config_injection() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+
+    let plugin_dir = dir.path().join("my-plugin");
+    fs::create_dir_all(&plugin_dir).unwrap();
+
+    let mut toml_file = File::create(plugin_dir.join("plugin.toml")).unwrap();
+    write!(
+        toml_file,
+        r#"
+        name = "my-plugin"
+        version = "0.1.0"
+        author = "Developer"
+        main = "init.lua"
+
+        [config]
+        key_one = "value_one"
+        key_two = 123
+        key_three = true
+    "#
+    )
+    .unwrap();
+
+    let mut lua_file = File::create(plugin_dir.join("init.lua")).unwrap();
+    write!(
+        lua_file,
+        "{}",
+        r#"
+        ascope.on("trigger_config_check", function()
+            local val1 = ascope.config["my-plugin"].key_one
+            local val2 = ascope.config["my-plugin"].key_two
+            local val3 = ascope.config["my-plugin"].key_three
+            ascope.notify("one:" .. val1 .. " two:" .. tostring(val2) .. " three:" .. tostring(val3), "info")
+            return "config_ok"
+        end)
+    "#
+    )
+    .unwrap();
+
+    let mut state = ascope::app::AppState::new(root.clone());
+    let config_dir = root.join(".config/ascope/plugins");
+    fs::create_dir_all(&config_dir).unwrap();
+    let dest_plugin = config_dir.join("my-plugin");
+    fs::create_dir_all(&dest_plugin).unwrap();
+    fs::copy(
+        plugin_dir.join("plugin.toml"),
+        dest_plugin.join("plugin.toml"),
+    )
+    .unwrap();
+    fs::copy(plugin_dir.join("init.lua"), dest_plugin.join("init.lua")).unwrap();
+
+    let mut engine = PluginEngine::new(config_dir).unwrap();
+    engine.load_plugins().unwrap();
+
+    ascope::plugin::engine::set_current_app_state(&mut state as *mut ascope::app::AppState);
+    state.plugin_engine = Some(engine);
+
+    let res = state.plugin_engine.as_ref().unwrap()
+        .trigger_event("trigger_config_check", String::new())
+        .unwrap();
+
+    assert_eq!(res, vec!["config_ok".to_string()]);
+    assert!(state.notification.is_some());
+    let (msg, _) = state.notification.unwrap();
+    assert!(msg.contains("one:value_one"));
+    assert!(msg.contains("two:123"));
+    assert!(msg.contains("three:true"));
+
+    ascope::plugin::engine::clear_current_app_state();
+}
+
+#[test]
+fn test_plugin_dynamic_keybindings() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+
+    let plugin_dir = dir.path().join("my-plugin");
+    fs::create_dir_all(&plugin_dir).unwrap();
+
+    let mut toml_file = File::create(plugin_dir.join("plugin.toml")).unwrap();
+    write!(
+        toml_file,
+        r#"
+        name = "my-plugin"
+        version = "0.1.0"
+        author = "Developer"
+        main = "init.lua"
+    "#
+    )
+    .unwrap();
+
+    let mut lua_file = File::create(plugin_dir.join("init.lua")).unwrap();
+    write!(
+        lua_file,
+        "{}",
+        r#"
+        ascope.register_key("ctrl-t", function()
+            ascope.notify("dynamic tmux trigger", "info")
+        end)
+    "#
+    )
+    .unwrap();
+
+    let mut state = ascope::app::AppState::new(root.clone());
+    let config_dir = root.join(".config/ascope/plugins");
+    fs::create_dir_all(&config_dir).unwrap();
+    let dest_plugin = config_dir.join("my-plugin");
+    fs::create_dir_all(&dest_plugin).unwrap();
+    fs::copy(
+        plugin_dir.join("plugin.toml"),
+        dest_plugin.join("plugin.toml"),
+    )
+    .unwrap();
+    fs::copy(plugin_dir.join("init.lua"), dest_plugin.join("init.lua")).unwrap();
+
+    let mut engine = PluginEngine::new(config_dir).unwrap();
+    engine.load_plugins().unwrap();
+
+    ascope::plugin::engine::set_current_app_state(&mut state as *mut ascope::app::AppState);
+    state.plugin_engine = Some(engine);
+
+    // Verify dynamic keybindings parsed
+    assert_eq!(state.plugin_engine.as_ref().unwrap().dynamic_keybindings.borrow().len(), 1);
+    assert_eq!(state.plugin_engine.as_ref().unwrap().dynamic_keybindings.borrow()[0].key, "ctrl-t");
+
+    // Execute the callback directly to check it works
+    let engine_ref = state.plugin_engine.as_ref().unwrap();
+    let key_ref = &engine_ref.dynamic_keybindings.borrow()[0].callback;
+    engine_ref.execute_key_callback(key_ref).unwrap();
+
+    assert!(state.notification.is_some());
+    let (msg, _) = state.notification.unwrap();
+    assert_eq!(msg, "[INFO] dynamic tmux trigger");
+
+    ascope::plugin::engine::clear_current_app_state();
+}
+
+
 
 
 
