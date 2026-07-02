@@ -92,6 +92,7 @@ fn event_loop(
     root: PathBuf,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let mut state = app::AppState::new(root);
+    ascope::plugin::engine::set_current_app_state(&mut state as *mut app::AppState);
     // Configurable tick rate of 16ms (~60fps) for smooth animations and updates.
     let events = ui::event::EventHandler::new(Duration::from_millis(16));
 
@@ -1109,6 +1110,7 @@ fn event_loop(
         }
     }
 
+    ascope::plugin::engine::clear_current_app_state();
     Ok(state.current_path)
 }
 

@@ -2,6 +2,44 @@ use crate::plugin::manifest::PluginManifest;
 use mlua::{Function, Lua, Table, Value};
 use std::fs;
 use std::path::PathBuf;
+use std::cell::Cell;
+use crate::app::AppState;
+
+thread_local! {
+    static CURRENT_STATE: Cell<Option<*mut AppState>> = const { Cell::new(None) };
+}
+
+pub fn set_current_app_state(state: *mut AppState) {
+    CURRENT_STATE.with(|cell| {
+        cell.set(Some(state));
+    });
+}
+
+pub fn clear_current_app_state() {
+    CURRENT_STATE.with(|cell| {
+        cell.set(None);
+    });
+}
+
+pub fn with_app_state<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&AppState) -> R,
+{
+    CURRENT_STATE.with(|cell| {
+        let ptr = cell.get()?;
+        unsafe { Some(f(&*ptr)) }
+    })
+}
+
+pub fn with_app_state_mut<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&mut AppState) -> R,
+{
+    CURRENT_STATE.with(|cell| {
+        let ptr = cell.get()?;
+        unsafe { Some(f(&mut *ptr)) }
+    })
+}
 
 pub struct PluginEngine {
     lua: Lua,
@@ -126,6 +164,63 @@ impl PluginEngine {
             Ok(results_table)
         })?;
         ascope_api.set("search", search_fn)?;
+
+        let get_cwd_fn = lua.create_function(|_, ()| {
+            let cwd = with_app_state(|state| {
+                state.current_path.to_string_lossy().to_string()
+            }).unwrap_or_default();
+            Ok(cwd)
+        })?;
+        ascope_api.set("get_cwd", get_cwd_fn)?;
+
+        let get_selection_fn = lua.create_function(|lua, ()| {
+            let selection = with_app_state(|state| {
+                if let Some(entry) = state.navigation.current_selection() {
+                    if let Ok(tbl) = lua.create_table() {
+                        let _ = tbl.set("path", entry.path.to_string_lossy().to_string());
+                        let _ = tbl.set("name", entry.path.file_name().unwrap_or_default().to_string_lossy().to_string());
+                        let _ = tbl.set("is_dir", matches!(entry.entry_type, crate::fs::walker::EntryType::Directory));
+                        let _ = tbl.set("size", entry.size);
+                        return Some(tbl);
+                    }
+                }
+                None
+            }).flatten();
+            Ok(selection)
+        })?;
+        ascope_api.set("get_selection", get_selection_fn)?;
+
+        let get_tab_list_fn = lua.create_function(|lua, ()| {
+            let tabs_table = lua.create_table()?;
+            with_app_state(|state| {
+                for (idx, tab) in state.tabs.iter().enumerate() {
+                    if let Ok(tab_tbl) = lua.create_table() {
+                        let _ = tab_tbl.set("id", idx + 1);
+                        let _ = tab_tbl.set("path", tab.current_path.to_string_lossy().to_string());
+                        let _ = tab_tbl.set("label", tab.current_path.file_name().unwrap_or_default().to_string_lossy().to_string());
+                        let _ = tabs_table.set(idx + 1, tab_tbl);
+                    }
+                }
+            });
+            Ok(tabs_table)
+        })?;
+        ascope_api.set("get_tab_list", get_tab_list_fn)?;
+
+        let get_active_tab_fn = lua.create_function(|lua, ()| {
+            let active_tab = with_app_state(|state| {
+                let idx = state.active_tab;
+                if let Some(tab) = state.tabs.get(idx) {
+                    if let Ok(tbl) = lua.create_table() {
+                        let _ = tbl.set("id", idx + 1);
+                        let _ = tbl.set("path", tab.current_path.to_string_lossy().to_string());
+                        return Some(tbl);
+                    }
+                }
+                None
+            }).flatten();
+            Ok(active_tab)
+        })?;
+        ascope_api.set("get_active_tab", get_active_tab_fn)?;
 
         lua.globals().set("ascope", ascope_api)?;
 

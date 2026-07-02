@@ -276,11 +276,7 @@ impl AppState {
             config.save();
         }
 
-        let mut plugin_engine =
-            crate::plugin::engine::PluginEngine::new(root.join(".config/ascope/plugins")).ok();
-        if let Some(ref mut engine) = plugin_engine {
-            let _ = engine.load_plugins();
-        }
+
 
         let initial_tab = Tab {
             current_path: root.clone(),
@@ -480,7 +476,7 @@ impl AppState {
             delete_targets: Vec::new(),
             show_help: false,
             help_selected_index: 0,
-            plugin_engine,
+            plugin_engine: None,
             last_selection_time: std::time::Instant::now(),
             search_overlay_mode: SearchOverlayMode::FuzzyFiles,
             search_overlay_input: String::new(),
@@ -522,6 +518,15 @@ impl AppState {
 
         state.command_palette_candidates = candidates.clone();
         state.command_palette_results = candidates;
+
+        // Set the thread-local state pointer during plugin loading
+        crate::plugin::engine::set_current_app_state(&mut state as *mut Self);
+        let mut plugin_engine =
+            crate::plugin::engine::PluginEngine::new(root.join(".config/ascope/plugins")).ok();
+        if let Some(ref mut engine) = plugin_engine {
+            let _ = engine.load_plugins();
+        }
+        state.plugin_engine = plugin_engine;
 
         state
     }
