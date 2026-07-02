@@ -41,4 +41,8 @@ function zoxide.query()
     end)
 end
 
+ascope.on("on_enter", function(path)
+    ascope.exec_shell("zoxide", {"add", path}, function() end)
+end)
+
 return zoxide
