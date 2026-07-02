@@ -257,4 +257,94 @@ fn test_plugin_action_dispatch() {
     assert_eq!(msg, "[INFO] Hello from plugin");
 }
 
+#[test]
+fn test_plugin_modal_overlay() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+
+    let plugin_dir = dir.path().join("my-plugin");
+    fs::create_dir_all(&plugin_dir).unwrap();
+
+    let mut toml_file = File::create(plugin_dir.join("plugin.toml")).unwrap();
+    write!(
+        toml_file,
+        r#"
+        name = "my-plugin"
+        version = "0.1.0"
+        author = "Developer"
+        main = "init.lua"
+    "#
+    )
+    .unwrap();
+
+    let mut lua_file = File::create(plugin_dir.join("init.lua")).unwrap();
+    write!(
+        lua_file,
+        "{}",
+        r#"
+        ascope.on("trigger_modal", function(payload)
+            ascope.open_modal({
+                title = "My Modal",
+                items = {
+                    { label = "Item 1", value = "val1" },
+                    { label = "Item 2", value = "val2" }
+                },
+                on_select = function(item, mode)
+                    ascope.notify("selected: " .. item.value .. " mode: " .. mode, "info")
+                end
+            })
+            return "modal_opened"
+        end)
+    "#
+    )
+    .unwrap();
+
+    // Instantiate AppState
+    let mut state = ascope::app::AppState::new(root.clone());
+
+    // Copy the plugin to config plugins directory
+    let config_dir = root.join(".config/ascope/plugins");
+    fs::create_dir_all(&config_dir).unwrap();
+    let dest_plugin = config_dir.join("my-plugin");
+    fs::create_dir_all(&dest_plugin).unwrap();
+    fs::copy(
+        plugin_dir.join("plugin.toml"),
+        dest_plugin.join("plugin.toml"),
+    )
+    .unwrap();
+    fs::copy(plugin_dir.join("init.lua"), dest_plugin.join("init.lua")).unwrap();
+
+    let mut engine = PluginEngine::new(config_dir).unwrap();
+    engine.load_plugins().unwrap();
+
+    ascope::plugin::engine::set_current_app_state(&mut state as *mut ascope::app::AppState);
+    // Bind state's plugin engine to our local engine instance so we can trigger callbacks
+    state.plugin_engine = Some(engine);
+
+    // Trigger the open modal event
+    let res = state.plugin_engine.as_ref().unwrap()
+        .trigger_event("trigger_modal", String::new())
+        .unwrap();
+
+    assert_eq!(res, vec!["modal_opened".to_string()]);
+    // Check that AppState modal mode is set correctly
+    assert_eq!(state.modal_mode, ascope::app::ModalMode::PluginOverlay);
+    assert_eq!(state.plugin_modal_title, "My Modal");
+    assert_eq!(state.plugin_modal_items.len(), 2);
+    assert_eq!(state.plugin_modal_items[0].label, "Item 1");
+    assert_eq!(state.plugin_modal_items[1].value, "val2");
+
+    // Trigger selection callback simulation
+    let engine_ref = state.plugin_engine.as_ref().unwrap();
+    engine_ref.trigger_modal_select("val2".to_string(), "select".to_string()).unwrap();
+
+    // Check that the callback triggered notification in AppState
+    assert!(state.notification.is_some());
+    let (msg, _) = state.notification.unwrap();
+    assert_eq!(msg, "[INFO] selected: val2 mode: select");
+
+    ascope::plugin::engine::clear_current_app_state();
+}
+
+
 

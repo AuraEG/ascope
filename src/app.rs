@@ -28,6 +28,12 @@ pub enum SortMode {
     MtimeDesc,
 }
 
+#[derive(Debug, Clone)]
+pub struct PluginOverlayItem {
+    pub label: String,
+    pub value: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalMode {
     None,
@@ -38,6 +44,7 @@ pub enum ModalMode {
     SearchOverlay,
     CommandPalette,
     SizeDetails,
+    PluginOverlay,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +180,11 @@ pub struct AppState {
     pub size_popup_stats: Option<Arc<Mutex<PathStats>>>,
     pub size_popup_progress: Option<Arc<Mutex<ScanProgress>>>,
     pub right_pane_dashboard_cache: std::cell::RefCell<Option<(PathBuf, FolderDashboardSummary)>>,
+    pub plugin_modal_title: String,
+    pub plugin_modal_items: Vec<PluginOverlayItem>,
+    pub plugin_modal_filtered_items: Vec<PluginOverlayItem>,
+    pub plugin_modal_input: String,
+    pub plugin_modal_selected_index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -496,6 +508,11 @@ impl AppState {
             size_popup_stats: None,
             size_popup_progress: None,
             right_pane_dashboard_cache: std::cell::RefCell::new(None),
+            plugin_modal_title: String::new(),
+            plugin_modal_items: Vec::new(),
+            plugin_modal_filtered_items: Vec::new(),
+            plugin_modal_input: String::new(),
+            plugin_modal_selected_index: 0,
         };
 
         // Discovered project commands
@@ -1641,6 +1658,20 @@ impl AppState {
                     });
             }
         }
+    }
+
+    pub fn update_plugin_modal_filtering(&mut self) {
+        let query = self.plugin_modal_input.to_lowercase();
+        if query.is_empty() {
+            self.plugin_modal_filtered_items = self.plugin_modal_items.clone();
+        } else {
+            self.plugin_modal_filtered_items = self.plugin_modal_items
+                .iter()
+                .filter(|item| item.label.to_lowercase().contains(&query))
+                .cloned()
+                .collect();
+        }
+        self.plugin_modal_selected_index = 0;
     }
 
     pub fn update_command_palette_results(&mut self) {
