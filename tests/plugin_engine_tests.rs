@@ -241,6 +241,7 @@ fn test_plugin_action_dispatch() {
     engine.load_plugins().unwrap();
 
     ascope::plugin::engine::set_current_app_state(&mut state as *mut ascope::app::AppState);
+    state.notification = None;
     let res = engine
         .trigger_event("dispatch_actions", target_dir.to_string_lossy().to_string())
         .unwrap();
@@ -334,6 +335,7 @@ fn test_plugin_modal_overlay() {
     assert_eq!(state.plugin_modal_items[0].label, "Item 1");
     assert_eq!(state.plugin_modal_items[1].value, "val2");
 
+    state.notification = None;
     // Trigger selection callback simulation
     let engine_ref = state.plugin_engine.as_ref().unwrap();
     engine_ref
@@ -401,6 +403,7 @@ fn test_plugin_exec_shell() {
     ascope::plugin::engine::set_current_app_state(&mut state as *mut ascope::app::AppState);
     state.plugin_engine = Some(engine);
 
+    state.notification = None;
     // Trigger the exec event
     let res = state
         .plugin_engine
@@ -739,7 +742,7 @@ fn test_plugin_config_injection() {
 
     ascope::plugin::engine::set_current_app_state(&mut state as *mut ascope::app::AppState);
     state.plugin_engine = Some(engine);
-
+    state.notification = None;
     let res = state
         .plugin_engine
         .as_ref()
@@ -826,6 +829,7 @@ fn test_plugin_dynamic_keybindings() {
         "ctrl-t"
     );
 
+    state.notification = None;
     // Execute the callback directly to check it works
     let engine_ref = state.plugin_engine.as_ref().unwrap();
     let key_ref = &engine_ref.dynamic_keybindings.borrow()[0].callback;
@@ -835,5 +839,56 @@ fn test_plugin_dynamic_keybindings() {
     let (msg, _) = state.notification.unwrap();
     assert_eq!(msg, "[INFO] dynamic tmux trigger");
 
+    ascope::plugin::engine::clear_current_app_state();
+}
+
+#[test]
+fn test_zoxide_plugin_integration() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let config_dir = root.join(".config/ascope/plugins");
+    let dest_plugin = config_dir.join("zoxide");
+    fs::create_dir_all(&dest_plugin).unwrap();
+
+    fs::copy(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/plugins/zoxide/plugin.toml"),
+        dest_plugin.join("plugin.toml"),
+    )
+    .unwrap();
+    fs::copy(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/plugins/zoxide/init.lua"),
+        dest_plugin.join("init.lua"),
+    )
+    .unwrap();
+
+    let mut state = ascope::app::AppState::new(root.clone());
+    let mut engine = PluginEngine::new(config_dir).unwrap();
+    ascope::plugin::engine::set_current_app_state(&mut state as *mut ascope::app::AppState);
+    engine.load_plugins().unwrap();
+    state.plugin_engine = Some(engine);
+
+    assert_eq!(state.plugin_engine.as_ref().unwrap().keybindings.len(), 0);
+    assert_eq!(
+        state
+            .plugin_engine
+            .as_ref()
+            .unwrap()
+            .dynamic_keybindings
+            .borrow()
+            .len(),
+        1
+    );
+    assert_eq!(
+        state
+            .plugin_engine
+            .as_ref()
+            .unwrap()
+            .dynamic_keybindings
+            .borrow()[0]
+            .key,
+        "shift-z"
+    );
     ascope::plugin::engine::clear_current_app_state();
 }
