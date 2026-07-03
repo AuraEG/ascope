@@ -2386,10 +2386,12 @@ fn render_plugin_overlay(f: &mut Frame, state: &AppState) {
     f.render_widget(input_para, chunks[0]);
 
     // Cursor for input
-    f.set_cursor(
-        chunks[0].x + 1 + state.plugin_modal_input.len() as u16,
-        chunks[0].y + 1,
-    );
+    if state.plugin_modal_focused {
+        f.set_cursor(
+            chunks[0].x + 1 + state.plugin_modal_cursor_index as u16,
+            chunks[0].y + 1,
+        );
+    }
 
     // Results list
     let total_results = state.plugin_modal_filtered_items.len();

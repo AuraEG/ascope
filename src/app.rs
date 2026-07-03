@@ -192,6 +192,8 @@ pub struct AppState {
     pub plugin_modal_filtered_items: Vec<PluginOverlayItem>,
     pub plugin_modal_input: String,
     pub plugin_modal_selected_index: usize,
+    pub plugin_modal_cursor_index: usize,
+    pub plugin_modal_focused: bool,
     pub shell_result_tx: std::sync::mpsc::Sender<ShellResult>,
     pub shell_result_rx: std::sync::mpsc::Receiver<ShellResult>,
     pub pending_key_sequence: String,
@@ -522,6 +524,8 @@ impl AppState {
             plugin_modal_filtered_items: Vec::new(),
             plugin_modal_input: String::new(),
             plugin_modal_selected_index: 0,
+            plugin_modal_cursor_index: 0,
+            plugin_modal_focused: true,
             shell_result_tx,
             shell_result_rx,
             pending_key_sequence: String::new(),
@@ -550,10 +554,22 @@ impl AppState {
 
         // Set the thread-local state pointer during plugin loading
         crate::plugin::engine::set_current_app_state(&mut state as *mut Self);
-        let mut plugin_engine =
-            crate::plugin::engine::PluginEngine::new(root.join(".config/ascope/plugins")).ok();
+        let local_plugin_dir = root.join(".config/ascope/plugins");
+        let plugin_dir = if local_plugin_dir.exists() {
+            local_plugin_dir
+        } else if !cfg!(test) && std::env::var("HOME").is_ok() {
+            PathBuf::from(std::env::var("HOME").unwrap()).join(".config/ascope/plugins")
+        } else {
+            local_plugin_dir
+        };
+        let mut plugin_engine = crate::plugin::engine::PluginEngine::new(plugin_dir).ok();
         if let Some(ref mut engine) = plugin_engine {
-            let _ = engine.load_plugins();
+            if let Err(e) = engine.load_plugins() {
+                state.notification = Some((
+                    format!("[ERROR] Plugins load failed: {}", e),
+                    std::time::Instant::now(),
+                ));
+            }
             let _ = engine.trigger_event("on_startup", String::new());
         }
         state.plugin_engine = plugin_engine;

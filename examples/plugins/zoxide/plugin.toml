@@ -1,0 +1,7 @@
+name = "zoxide"
+version = "0.1.0"
+author = "Developer"
+main = "init.lua"
+
+[config]
+key_binding = "shift-z"

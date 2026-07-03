@@ -1,6 +1,11 @@
-local zoxide = {}
+local key = "shift-z"
+if ascope.config and ascope.config["zoxide"] and ascope.config["zoxide"].key_binding then
+    key = ascope.config["zoxide"].key_binding
+end
 
-function zoxide.query()
+ascope.notify("Loading zoxide plugin with key: " .. key, "info")
+
+local function zoxide_query()
     ascope.exec_shell("zoxide", {"query", "--list", "--score"}, function(stdout, stderr, exit_code)
         if exit_code ~= 0 then
             ascope.notify("Zoxide query failed", "error")
@@ -41,8 +46,10 @@ function zoxide.query()
     end)
 end
 
+ascope.register_key(key, zoxide_query)
+
 ascope.on("on_enter", function(path)
     ascope.exec_shell("zoxide", {"add", path}, function() end)
 end)
 
-return zoxide
+ascope.notify("Zoxide plugin registered successfully", "info")

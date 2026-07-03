@@ -340,6 +340,8 @@ impl PluginEngine {
                 state.plugin_modal_filtered_items = items;
                 state.plugin_modal_input.clear();
                 state.plugin_modal_selected_index = 0;
+                state.plugin_modal_cursor_index = 0;
+                state.plugin_modal_focused = true;
             });
 
             with_app_state_mut(|state| {
