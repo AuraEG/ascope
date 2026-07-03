@@ -2340,6 +2340,19 @@ fn render_command_palette(f: &mut Frame, state: &AppState, area: Rect) {
     }
 }
 
+fn split_icon_and_label(text: &str) -> (Option<&str>, &str) {
+    let mut chars = text.chars();
+    if let Some(first_char) = chars.next() {
+        if !first_char.is_ascii() && first_char != ' ' {
+            let icon_len = first_char.len_utf8();
+            let mut rest = &text[icon_len..];
+            rest = rest.trim_start();
+            return (Some(&text[..icon_len]), rest);
+        }
+    }
+    (None, text)
+}
+
 fn render_plugin_overlay(f: &mut Frame, state: &AppState) {
     let modal_area = centered_rect(70, 50, f.size());
     f.render_widget(Clear, modal_area);
@@ -2376,10 +2389,16 @@ fn render_plugin_overlay(f: &mut Frame, state: &AppState) {
         .split(inner_area);
 
     // Prompt input
+    let input_border_style = if state.plugin_modal_focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
     let input_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(" Search / Filter ");
+        .border_style(input_border_style)
+        .title(" 󰍉 Search / Filter ");
     let input_para = Paragraph::new(state.plugin_modal_input.as_str())
         .block(input_block)
         .style(Style::default().fg(Color::White));
@@ -2388,7 +2407,7 @@ fn render_plugin_overlay(f: &mut Frame, state: &AppState) {
     // Cursor for input
     if state.plugin_modal_focused {
         f.set_cursor(
-            chunks[0].x + 1 + state.plugin_modal_cursor_index as u16,
+            chunks[0].x + 2 + state.plugin_modal_cursor_index as u16,
             chunks[0].y + 1,
         );
     }
@@ -2414,6 +2433,8 @@ fn render_plugin_overlay(f: &mut Frame, state: &AppState) {
     let end_idx = total_results.min(start_idx + list_height);
     let window = &state.plugin_modal_filtered_items[start_idx..end_idx];
 
+
+
     let list_items: Vec<ListItem> = window
         .iter()
         .enumerate()
@@ -2421,16 +2442,30 @@ fn render_plugin_overlay(f: &mut Frame, state: &AppState) {
             let actual_idx = start_idx + i;
             let is_selected = actual_idx == state.plugin_modal_selected_index;
 
-            let text_style = if is_selected {
-                Style::default().fg(Color::Black).bg(Color::Cyan).bold()
+            let (icon, rest) = split_icon_and_label(result.label.trim());
+            let mut spans = vec![];
+
+            if is_selected {
+                spans.push(Span::styled("▍ ", Style::default().fg(Color::Cyan)));
+                if let Some(ic) = icon {
+                    spans.push(Span::styled(format!("{} ", ic), Style::default().fg(Color::Yellow).bold()));
+                }
+                spans.push(Span::styled(rest, Style::default().fg(Color::White).bold()));
             } else {
-                Style::default().fg(Color::White)
+                spans.push(Span::raw("  "));
+                if let Some(ic) = icon {
+                    spans.push(Span::styled(format!("{} ", ic), Style::default().fg(Color::Cyan)));
+                }
+                spans.push(Span::styled(rest, Style::default().fg(Color::Gray)));
+            }
+
+            let style = if is_selected {
+                Style::default().bg(Color::Rgb(35, 35, 45))
+            } else {
+                Style::default()
             };
 
-            ListItem::new(Line::from(vec![Span::styled(
-                format!("  {} ", result.label),
-                text_style,
-            )]))
+            ListItem::new(Line::from(spans)).style(style)
         })
         .collect();
 
