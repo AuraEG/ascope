@@ -8,6 +8,8 @@ function ascope_fzf.pick(title, items, on_select)
     })
 end
 
+ascope.fzf = ascope_fzf
+
 local key = "ctrl-f"
 if ascope.config and ascope.config["fzf"] and ascope.config["fzf"].key_binding then
     key = ascope.config["fzf"].key_binding
