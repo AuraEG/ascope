@@ -24,6 +24,7 @@ ascope.register_key(key, function()
             { label = "[h] Open in horizontal split", value = "hsplit" },
             { label = "[w] Open in new window", value = "window" },
             { label = "[p] Send path to pane...", value = "send_pane" },
+            { label = "[s] Switch session...", value = "switch_session" },
         },
         on_select = function(item)
             if item.value == "vsplit" then
@@ -55,6 +56,33 @@ ascope.register_key(key, function()
                         on_select = function(pane_item)
                             ascope.exec_shell("tmux", {"send-keys", "-t", pane_item.value, path, "Enter"}, function()
                                 ascope.notify("Sent path to pane " .. pane_item.label, "info")
+                            end)
+                        end
+                    })
+                end)
+            elseif item.value == "switch_session" then
+                ascope.exec_shell("tmux", {"list-sessions", "-F", "#{session_name}\t#{session_windows} windows"}, function(stdout, stderr, exit_code)
+                    if exit_code ~= 0 then
+                        ascope.notify("Failed to query tmux sessions", "error")
+                        return
+                    end
+                    local sessions = {}
+                    for line in stdout:gmatch("[^\r\n]+") do
+                        local name, info = line:match("^(%S+)\t(.*)$")
+                        if name then
+                            table.insert(sessions, { label = "🖥 " .. name .. " (" .. info .. ")", value = name })
+                        end
+                    end
+                    if #sessions == 0 then
+                        ascope.notify("No tmux sessions found", "warn")
+                        return
+                    end
+                    ascope.open_modal({
+                        title = "🖥 Switch Tmux Session",
+                        items = sessions,
+                        on_select = function(sess_item)
+                            ascope.exec_shell("tmux", {"switch-client", "-t", sess_item.value}, function()
+                                ascope.notify("Switched to session " .. sess_item.value, "info")
                             end)
                         end
                     })
