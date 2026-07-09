@@ -68,6 +68,7 @@ where
 pub struct DynamicKeybinding {
     pub key: String,
     pub callback: mlua::RegistryKey,
+    pub description: Option<String>,
 }
 
 pub struct PluginEngine {
@@ -276,7 +277,27 @@ impl PluginEngine {
         let navigate_fn = lua.create_function(|_, path: String| {
             let path_buf = PathBuf::from(path);
             with_app_state_mut(|state| {
-                state.jump_to_path(path_buf);
+                let full_path = if path_buf.is_absolute() {
+                    path_buf.clone()
+                } else {
+                    state.current_path.join(&path_buf)
+                };
+
+                if full_path.is_file() {
+                    if let Some(parent) = full_path.parent() {
+                        state.jump_to_path(parent.to_path_buf());
+                        let file_name = full_path.file_name().unwrap_or_default();
+                        if let Some(idx) = state
+                            .all_entries
+                            .iter()
+                            .position(|entry| entry.path.file_name() == Some(file_name))
+                        {
+                            state.navigation.set_cursor(idx);
+                        }
+                    }
+                } else {
+                    state.jump_to_path(path_buf);
+                }
             });
             Ok(())
         })?;
@@ -340,6 +361,9 @@ impl PluginEngine {
                 state.plugin_modal_filtered_items = items;
                 state.plugin_modal_input.clear();
                 state.plugin_modal_selected_index = 0;
+                state.plugin_modal_cursor_index = 0;
+                state.plugin_modal_focused = true;
+                state.update_plugin_modal_preview();
             });
 
             with_app_state_mut(|state| {
@@ -351,6 +375,87 @@ impl PluginEngine {
             Ok(())
         })?;
         ascope_api.set("open_modal", open_modal_fn)?;
+
+        let close_modal_fn = lua.create_function(|_, ()| {
+            with_app_state_mut(|state| {
+                state.modal_mode = crate::app::ModalMode::None;
+                if let Some(ref mut engine) = state.plugin_engine {
+                    *engine.active_modal_callback.borrow_mut() = None;
+                }
+            });
+            Ok(())
+        })?;
+        ascope_api.set("close_modal", close_modal_fn)?;
+
+        let open_in_editor_fn = lua.create_function(|_, path: String| {
+            let path_buf = PathBuf::from(path);
+            let full_path = with_app_state(|state| {
+                if path_buf.is_absolute() {
+                    path_buf.clone()
+                } else {
+                    state.current_path.join(&path_buf)
+                }
+            })
+            .unwrap_or(path_buf);
+
+            use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+            use crossterm::execute;
+            use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+            use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
+
+            let _ = disable_raw_mode();
+            let mut stdout = std::io::stdout();
+            let _ = execute!(
+                stdout,
+                LeaveAlternateScreen,
+                DisableMouseCapture,
+                crossterm::cursor::Show
+            );
+
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nvim".to_string());
+            let mut cmd = std::process::Command::new(&editor);
+            cmd.arg(&full_path);
+
+            if let Ok(mut child) = cmd.spawn() {
+                let _ = child.wait();
+            }
+
+            let _ = enable_raw_mode();
+            let _ = execute!(
+                stdout,
+                EnterAlternateScreen,
+                EnableMouseCapture,
+                crossterm::cursor::Hide
+            );
+
+            with_app_state_mut(|state| {
+                state.needs_terminal_clear = true;
+            });
+
+            Ok(())
+        })?;
+        ascope_api.set("open_in_editor", open_in_editor_fn)?;
+
+        let open_in_default_app_fn = lua.create_function(|_, path: String| {
+            let path_buf = PathBuf::from(path);
+            let full_path = with_app_state(|state| {
+                if path_buf.is_absolute() {
+                    path_buf.clone()
+                } else {
+                    state.current_path.join(&path_buf)
+                }
+            })
+            .unwrap_or(path_buf);
+
+            let _ = std::process::Command::new("xdg-open")
+                .arg(full_path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            Ok(())
+        })?;
+        ascope_api.set("open_in_default_app", open_in_default_app_fn)?;
 
         let exec_shell_fn =
             lua.create_function(|lua, (cmd, args, cb): (String, Table, Function)| {
@@ -400,19 +505,22 @@ impl PluginEngine {
             })?;
         ascope_api.set("exec_shell", exec_shell_fn)?;
 
-        let register_key_fn = lua.create_function(|lua, (binding, cb): (String, Function)| {
-            let key = lua.create_registry_value(cb)?;
-            with_current_engine_mut(|engine| {
-                engine
-                    .dynamic_keybindings
-                    .borrow_mut()
-                    .push(DynamicKeybinding {
-                        key: binding,
-                        callback: key,
-                    });
-            });
-            Ok(())
-        })?;
+        let register_key_fn = lua.create_function(
+            |lua, (binding, cb, description): (String, Function, Option<String>)| {
+                let key = lua.create_registry_value(cb)?;
+                with_current_engine_mut(|engine| {
+                    engine
+                        .dynamic_keybindings
+                        .borrow_mut()
+                        .push(DynamicKeybinding {
+                            key: binding,
+                            callback: key,
+                            description,
+                        });
+                });
+                Ok(())
+            },
+        )?;
         ascope_api.set("register_key", register_key_fn)?;
 
         let config_tbl = lua.create_table()?;

@@ -227,6 +227,9 @@ pub fn extract_pdf_first_page(pdf_path: &Path) -> Result<PathBuf, String> {
 
 /// Resizes the image and renders it using Unicode half-blocks with truecolor.
 pub fn render_half_block(img: &DynamicImage, cols: u16, rows: u16) -> Vec<Line<'static>> {
+    if cols == 0 || rows == 0 {
+        return vec![];
+    }
     let target_w = cols as u32;
     let target_h = (rows * 2) as u32;
     let resized = img.thumbnail(target_w, target_h);

@@ -114,13 +114,14 @@ fn event_loop(
 
         if state.last_selection_time.elapsed().as_millis() > 50 {
             state.update_preview_cache(preview_w, preview_h);
-        } else {
-            // Poll async preview updates even if we don't fully refresh the cache,
-            // to make sure background workers can still deliver results.
-            state.poll_preview_updates();
         }
+        state.poll_preview_updates();
         state.poll_search_updates();
         state.poll_shell_updates();
+        if state.needs_terminal_clear {
+            let _ = terminal.clear();
+            state.needs_terminal_clear = false;
+        }
         terminal.draw(|f| ui::widgets::render_dashboard(f, &state))?;
 
         match events.next()? {
@@ -148,11 +149,17 @@ fn event_loop(
                                 .contains(crossterm::event::KeyModifiers::CONTROL);
                             let has_alt =
                                 key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
+                            let has_shift = key
+                                .modifiers
+                                .contains(crossterm::event::KeyModifiers::SHIFT)
+                                || c.is_uppercase();
 
                             let key_str = if has_ctrl {
-                                format!("ctrl-{}", c)
+                                format!("ctrl-{}", c.to_lowercase())
                             } else if has_alt {
-                                format!("alt-{}", c)
+                                format!("alt-{}", c.to_lowercase())
+                            } else if has_shift {
+                                format!("shift-{}", c.to_lowercase())
                             } else {
                                 c.to_string()
                             };
@@ -172,8 +179,15 @@ fn event_loop(
                             let mut prefix_match = false;
 
                             for kb in &engine.keybindings {
-                                let kb_key_normalized = kb.key.trim().to_lowercase();
-                                let proposed_seq_normalized = proposed_seq.trim().to_lowercase();
+                                let mut kb_key_normalized =
+                                    kb.key.trim().to_lowercase().replace('+', "-");
+                                if kb.key.trim().len() == 1
+                                    && kb.key.trim().chars().next().unwrap().is_uppercase()
+                                {
+                                    kb_key_normalized = format!("shift-{}", kb_key_normalized);
+                                }
+                                let proposed_seq_normalized =
+                                    proposed_seq.trim().to_lowercase().replace('+', "-");
 
                                 if kb_key_normalized == proposed_seq_normalized {
                                     complete_match =
@@ -187,8 +201,15 @@ fn event_loop(
                             }
 
                             for dkb in &*dkb_guard {
-                                let kb_key_normalized = dkb.key.trim().to_lowercase();
-                                let proposed_seq_normalized = proposed_seq.trim().to_lowercase();
+                                let mut kb_key_normalized =
+                                    dkb.key.trim().to_lowercase().replace('+', "-");
+                                if dkb.key.trim().len() == 1
+                                    && dkb.key.trim().chars().next().unwrap().is_uppercase()
+                                {
+                                    kb_key_normalized = format!("shift-{}", kb_key_normalized);
+                                }
+                                let proposed_seq_normalized =
+                                    proposed_seq.trim().to_lowercase().replace('+', "-");
 
                                 if kb_key_normalized == proposed_seq_normalized {
                                     complete_match =
@@ -219,12 +240,19 @@ fn event_loop(
                                 state.pending_key_sequence.clear();
 
                                 let fresh_seq = key_str;
-                                let fresh_seq_normalized = fresh_seq.trim().to_lowercase();
+                                let fresh_seq_normalized =
+                                    fresh_seq.trim().to_lowercase().replace('+', "-");
                                 let mut fresh_complete_match = None;
                                 let mut fresh_prefix_match = false;
 
                                 for kb in &engine.keybindings {
-                                    let kb_key_normalized = kb.key.trim().to_lowercase();
+                                    let mut kb_key_normalized =
+                                        kb.key.trim().to_lowercase().replace('+', "-");
+                                    if kb.key.trim().len() == 1
+                                        && kb.key.trim().chars().next().unwrap().is_uppercase()
+                                    {
+                                        kb_key_normalized = format!("shift-{}", kb_key_normalized);
+                                    }
                                     if kb_key_normalized == fresh_seq_normalized {
                                         fresh_complete_match =
                                             Some(ActionOrCallback::Event(kb.event.clone()));
@@ -237,7 +265,13 @@ fn event_loop(
                                 }
 
                                 for dkb in &*dkb_guard {
-                                    let kb_key_normalized = dkb.key.trim().to_lowercase();
+                                    let mut kb_key_normalized =
+                                        dkb.key.trim().to_lowercase().replace('+', "-");
+                                    if dkb.key.trim().len() == 1
+                                        && dkb.key.trim().chars().next().unwrap().is_uppercase()
+                                    {
+                                        kb_key_normalized = format!("shift-{}", kb_key_normalized);
+                                    }
                                     if kb_key_normalized == fresh_seq_normalized {
                                         fresh_complete_match =
                                             Some(ActionOrCallback::Callback(&dkb.callback));
@@ -278,11 +312,11 @@ fn event_loop(
                             state.show_help = false;
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            let count = crate::ui::widgets::help_items_len();
+                            let count = crate::ui::widgets::help_items_len(&state);
                             state.help_selected_index = (state.help_selected_index + 1) % count;
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
-                            let count = crate::ui::widgets::help_items_len();
+                            let count = crate::ui::widgets::help_items_len(&state);
                             state.help_selected_index =
                                 (state.help_selected_index + count - 1) % count;
                         }
@@ -307,75 +341,270 @@ fn event_loop(
                     }
                 } else if state.modal_mode != ascope::app::ModalMode::None {
                     if state.modal_mode == ascope::app::ModalMode::PluginOverlay {
-                        match key.code {
-                            KeyCode::Esc => {
-                                state.modal_mode = ascope::app::ModalMode::None;
-                                if let Some(ref engine) = state.plugin_engine {
-                                    let _ = engine.clear_modal_callback();
-                                }
-                            }
-                            KeyCode::Up | KeyCode::Char('p')
-                                if key
-                                    .modifiers
-                                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                            {
-                                let len = state.plugin_modal_filtered_items.len();
-                                if len > 0 {
-                                    state.plugin_modal_selected_index =
-                                        (state.plugin_modal_selected_index + len - 1) % len;
-                                }
-                            }
-                            KeyCode::Down | KeyCode::Char('n')
-                                if key
-                                    .modifiers
-                                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                            {
-                                let len = state.plugin_modal_filtered_items.len();
-                                if len > 0 {
-                                    state.plugin_modal_selected_index =
-                                        (state.plugin_modal_selected_index + 1) % len;
-                                }
-                            }
-                            KeyCode::Up => {
-                                let len = state.plugin_modal_filtered_items.len();
-                                if len > 0 {
-                                    state.plugin_modal_selected_index =
-                                        (state.plugin_modal_selected_index + len - 1) % len;
-                                }
-                            }
-                            KeyCode::Down => {
-                                let len = state.plugin_modal_filtered_items.len();
-                                if len > 0 {
-                                    state.plugin_modal_selected_index =
-                                        (state.plugin_modal_selected_index + 1) % len;
-                                }
-                            }
-                            KeyCode::Enter => {
-                                let idx = state.plugin_modal_selected_index;
-                                if let Some(item) =
-                                    state.plugin_modal_filtered_items.get(idx).cloned()
-                                {
-                                    state.modal_mode = ascope::app::ModalMode::None;
-                                    if let Some(ref engine) = state.plugin_engine {
-                                        let _ = engine
-                                            .trigger_modal_select(item.value, "select".to_string());
-                                    }
-                                } else {
+                        if state.plugin_modal_focused {
+                            match key.code {
+                                KeyCode::Esc => {
                                     state.modal_mode = ascope::app::ModalMode::None;
                                     if let Some(ref engine) = state.plugin_engine {
                                         let _ = engine.clear_modal_callback();
                                     }
                                 }
+                                KeyCode::Up | KeyCode::Char('p')
+                                    if key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                                {
+                                    state.plugin_modal_focused = false;
+                                    let len = state.plugin_modal_filtered_items.len();
+                                    if len > 0 {
+                                        state.plugin_modal_selected_index =
+                                            (state.plugin_modal_selected_index + len - 1) % len;
+                                    }
+                                }
+                                KeyCode::Down | KeyCode::Char('n')
+                                    if key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                                {
+                                    state.plugin_modal_focused = false;
+                                    let len = state.plugin_modal_filtered_items.len();
+                                    if len > 0 {
+                                        state.plugin_modal_selected_index =
+                                            (state.plugin_modal_selected_index + 1) % len;
+                                    }
+                                }
+                                KeyCode::Char('k')
+                                    if key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                                {
+                                    state.plugin_modal_focused = false;
+                                    let len = state.plugin_modal_filtered_items.len();
+                                    if len > 0 {
+                                        state.plugin_modal_selected_index =
+                                            (state.plugin_modal_selected_index + len - 1) % len;
+                                    }
+                                }
+                                KeyCode::Char('j')
+                                    if key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                                {
+                                    state.plugin_modal_focused = false;
+                                    let len = state.plugin_modal_filtered_items.len();
+                                    if len > 0 {
+                                        state.plugin_modal_selected_index =
+                                            (state.plugin_modal_selected_index + 1) % len;
+                                    }
+                                }
+                                KeyCode::Up => {
+                                    state.plugin_modal_focused = false;
+                                    let len = state.plugin_modal_filtered_items.len();
+                                    if len > 0 {
+                                        state.plugin_modal_selected_index =
+                                            (state.plugin_modal_selected_index + len - 1) % len;
+                                    }
+                                }
+                                KeyCode::Down => {
+                                    state.plugin_modal_focused = false;
+                                    let len = state.plugin_modal_filtered_items.len();
+                                    if len > 0 {
+                                        state.plugin_modal_selected_index =
+                                            (state.plugin_modal_selected_index + 1) % len;
+                                    }
+                                }
+                                KeyCode::Left => {
+                                    if state.plugin_modal_cursor_index > 0 {
+                                        state.plugin_modal_cursor_index -= 1;
+                                    }
+                                }
+                                KeyCode::Right => {
+                                    if state.plugin_modal_cursor_index
+                                        < state.plugin_modal_input.chars().count()
+                                    {
+                                        state.plugin_modal_cursor_index += 1;
+                                    }
+                                }
+                                KeyCode::Backspace => {
+                                    if state.plugin_modal_cursor_index > 0 {
+                                        let char_idx = state.plugin_modal_cursor_index - 1;
+                                        if let Some((byte_idx, _)) =
+                                            state.plugin_modal_input.char_indices().nth(char_idx)
+                                        {
+                                            state.plugin_modal_input.remove(byte_idx);
+                                            state.plugin_modal_cursor_index -= 1;
+                                            state.update_plugin_modal_filtering();
+                                        }
+                                    }
+                                }
+                                KeyCode::Delete => {
+                                    if state.plugin_modal_cursor_index
+                                        < state.plugin_modal_input.chars().count()
+                                    {
+                                        let char_idx = state.plugin_modal_cursor_index;
+                                        if let Some((byte_idx, _)) =
+                                            state.plugin_modal_input.char_indices().nth(char_idx)
+                                        {
+                                            state.plugin_modal_input.remove(byte_idx);
+                                            state.update_plugin_modal_filtering();
+                                        }
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                    let idx = state.plugin_modal_selected_index;
+                                    if let Some(item) =
+                                        state.plugin_modal_filtered_items.get(idx).cloned()
+                                    {
+                                        state.modal_mode = ascope::app::ModalMode::None;
+                                        if let Some(ref engine) = state.plugin_engine {
+                                            let _ = engine.trigger_modal_select(
+                                                item.value,
+                                                "select".to_string(),
+                                            );
+                                        }
+                                    } else {
+                                        state.modal_mode = ascope::app::ModalMode::None;
+                                        if let Some(ref engine) = state.plugin_engine {
+                                            let _ = engine.clear_modal_callback();
+                                        }
+                                    }
+                                }
+                                KeyCode::Char(c)
+                                    if !key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL)
+                                        && !key
+                                            .modifiers
+                                            .contains(crossterm::event::KeyModifiers::ALT) =>
+                                {
+                                    let char_idx = state.plugin_modal_cursor_index;
+                                    let byte_idx = state
+                                        .plugin_modal_input
+                                        .char_indices()
+                                        .nth(char_idx)
+                                        .map(|(i, _)| i)
+                                        .unwrap_or(state.plugin_modal_input.len());
+                                    state.plugin_modal_input.insert(byte_idx, c);
+                                    state.plugin_modal_cursor_index += 1;
+                                    state.update_plugin_modal_filtering();
+                                }
+                                _ => {}
                             }
-                            KeyCode::Backspace => {
-                                state.plugin_modal_input.pop();
-                                state.update_plugin_modal_filtering();
+                        } else {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    state.modal_mode = ascope::app::ModalMode::None;
+                                    if let Some(ref engine) = state.plugin_engine {
+                                        let _ = engine.clear_modal_callback();
+                                    }
+                                }
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    let len = state.plugin_modal_filtered_items.len();
+                                    if len > 0 {
+                                        state.plugin_modal_selected_index =
+                                            (state.plugin_modal_selected_index + len - 1) % len;
+                                    }
+                                }
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    let len = state.plugin_modal_filtered_items.len();
+                                    if len > 0 {
+                                        state.plugin_modal_selected_index =
+                                            (state.plugin_modal_selected_index + 1) % len;
+                                    }
+                                }
+                                KeyCode::Char('p')
+                                    if key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                                {
+                                    let len = state.plugin_modal_filtered_items.len();
+                                    if len > 0 {
+                                        state.plugin_modal_selected_index =
+                                            (state.plugin_modal_selected_index + len - 1) % len;
+                                    }
+                                }
+                                KeyCode::Char('n')
+                                    if key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                                {
+                                    let len = state.plugin_modal_filtered_items.len();
+                                    if len > 0 {
+                                        state.plugin_modal_selected_index =
+                                            (state.plugin_modal_selected_index + 1) % len;
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                    let idx = state.plugin_modal_selected_index;
+                                    if let Some(item) =
+                                        state.plugin_modal_filtered_items.get(idx).cloned()
+                                    {
+                                        state.modal_mode = ascope::app::ModalMode::None;
+                                        if let Some(ref engine) = state.plugin_engine {
+                                            let _ = engine.trigger_modal_select(
+                                                item.value,
+                                                "select".to_string(),
+                                            );
+                                        }
+                                    } else {
+                                        state.modal_mode = ascope::app::ModalMode::None;
+                                        if let Some(ref engine) = state.plugin_engine {
+                                            let _ = engine.clear_modal_callback();
+                                        }
+                                    }
+                                }
+                                KeyCode::Backspace => {
+                                    state.plugin_modal_focused = true;
+                                    if state.plugin_modal_cursor_index > 0 {
+                                        let char_idx = state.plugin_modal_cursor_index - 1;
+                                        if let Some((byte_idx, _)) =
+                                            state.plugin_modal_input.char_indices().nth(char_idx)
+                                        {
+                                            state.plugin_modal_input.remove(byte_idx);
+                                            state.plugin_modal_cursor_index -= 1;
+                                            state.update_plugin_modal_filtering();
+                                        }
+                                    }
+                                }
+                                KeyCode::Left => {
+                                    state.plugin_modal_focused = true;
+                                    if state.plugin_modal_cursor_index > 0 {
+                                        state.plugin_modal_cursor_index -= 1;
+                                    }
+                                }
+                                KeyCode::Right => {
+                                    state.plugin_modal_focused = true;
+                                    if state.plugin_modal_cursor_index
+                                        < state.plugin_modal_input.chars().count()
+                                    {
+                                        state.plugin_modal_cursor_index += 1;
+                                    }
+                                }
+                                KeyCode::Char(c)
+                                    if !key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL)
+                                        && !key
+                                            .modifiers
+                                            .contains(crossterm::event::KeyModifiers::ALT) =>
+                                {
+                                    state.plugin_modal_focused = true;
+                                    let char_idx = state.plugin_modal_cursor_index;
+                                    let byte_idx = state
+                                        .plugin_modal_input
+                                        .char_indices()
+                                        .nth(char_idx)
+                                        .map(|(i, _)| i)
+                                        .unwrap_or(state.plugin_modal_input.len());
+                                    state.plugin_modal_input.insert(byte_idx, c);
+                                    state.plugin_modal_cursor_index += 1;
+                                    state.update_plugin_modal_filtering();
+                                }
+                                _ => {}
                             }
-                            KeyCode::Char(c) => {
-                                state.plugin_modal_input.push(c);
-                                state.update_plugin_modal_filtering();
-                            }
-                            _ => {}
+                        }
+                        if state.modal_mode == ascope::app::ModalMode::PluginOverlay {
+                            state.update_plugin_modal_preview();
                         }
                     } else if state.modal_mode == ascope::app::ModalMode::CommandPalette {
                         if state.command_palette_focused {
@@ -1182,6 +1411,7 @@ fn event_loop(
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
                         KeyCode::Char('/') => state.toggle_search_mode(),
+                        KeyCode::Char('.') => state.toggle_hidden(),
                         KeyCode::Down | KeyCode::Char('j') => state.move_selection(1),
                         KeyCode::Char('k')
                             if key
@@ -1326,7 +1556,7 @@ fn event_loop(
     }
 
     ascope::plugin::engine::clear_current_app_state();
-    Ok(state.current_path)
+    Ok(state.current_path.clone())
 }
 
 // --------------------------------------------------------------------------
@@ -1337,7 +1567,7 @@ fn main() {
     let args = Args::parse();
 
     if args.stats {
-        match fs::walker::scan_path(&args.path) {
+        match fs::walker::scan_path(&args.path, false) {
             Ok(stats) => {
                 if args.json {
                     println!("{}", serde_json::to_string_pretty(&stats).unwrap());
