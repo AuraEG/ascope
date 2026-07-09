@@ -69,7 +69,7 @@ pub enum ScanProgress {
 
 /// Quickly scan immediate children of a directory (non-recursively).
 /// Directory entry sizes are set to `u64::MAX` as a placeholder for uncalculated size.
-pub fn scan_immediate(root: &Path) -> Result<Vec<DirEntry>, std::io::Error> {
+pub fn scan_immediate(root: &Path, show_hidden: bool) -> Result<Vec<DirEntry>, std::io::Error> {
     let mut entries = Vec::new();
     let read_dir = std::fs::read_dir(root)?;
     for entry in read_dir {
@@ -78,10 +78,12 @@ pub fn scan_immediate(root: &Path) -> Result<Vec<DirEntry>, std::io::Error> {
             Err(_) => continue,
         };
         let path = entry.path();
-        // Skip hidden files/directories (starting with '.')
-        if let Some(name) = path.file_name() {
-            if name.to_string_lossy().starts_with('.') {
-                continue;
+        if !show_hidden {
+            // Skip hidden files/directories (starting with '.')
+            if let Some(name) = path.file_name() {
+                if name.to_string_lossy().starts_with('.') {
+                    continue;
+                }
             }
         }
         let file_type = match entry.file_type() {
@@ -163,12 +165,13 @@ pub fn scan_path_async(
     root: PathBuf,
     stats_out: Arc<Mutex<PathStats>>,
     progress_out: Arc<Mutex<ScanProgress>>,
+    show_hidden: bool,
 ) {
     let builder = thread::Builder::new().name("ascope-scanner".to_string());
     builder
         .spawn(move || {
             *progress_out.lock().unwrap_or_else(|e| e.into_inner()) = ScanProgress::Scanning;
-            match scan_path(&root) {
+            match scan_path(&root, show_hidden) {
                 Ok(stats) => {
                     *stats_out.lock().unwrap_or_else(|e| e.into_inner()) = stats;
                     *progress_out.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -189,7 +192,7 @@ pub fn scan_path_async(
 
 /// Recursively scan `root`, skipping hidden entries, and return aggregated
 /// [`PathStats`]. Uses jwalk's serial traversal in the background to avoid CPU thread starvation.
-pub fn scan_path(root: &Path) -> Result<PathStats, std::io::Error> {
+pub fn scan_path(root: &Path, show_hidden: bool) -> Result<PathStats, std::io::Error> {
     let mut total_size: u64 = 0;
     let mut file_count: u64 = 0;
     let mut subdirs: HashMap<PathBuf, u64> = HashMap::new();
@@ -200,7 +203,7 @@ pub fn scan_path(root: &Path) -> Result<PathStats, std::io::Error> {
 
     // 1. Walk the directory tree serially (caps CPU usage to 1 core, preventing lag)
     for entry in WalkDir::new(root)
-        .skip_hidden(true)
+        .skip_hidden(!show_hidden)
         .parallelism(jwalk::Parallelism::Serial)
         .into_iter()
         .filter_map(Result::ok)
@@ -342,7 +345,7 @@ mod tests {
             f2.write_all(b"rust-systems").unwrap(); // 12 bytes
         }
 
-        let stats = scan_path(dir.path()).unwrap();
+        let stats = scan_path(dir.path(), false).unwrap();
         assert_eq!(stats.total_size, 17);
         assert_eq!(stats.file_count, 2);
     }
@@ -350,7 +353,7 @@ mod tests {
     #[test]
     fn test_scan_empty_directory() {
         let dir = tempdir().unwrap();
-        let stats = scan_path(dir.path()).unwrap();
+        let stats = scan_path(dir.path(), false).unwrap();
         assert_eq!(stats.total_size, 0);
         assert_eq!(stats.file_count, 0);
         assert!(stats.subdirs.is_empty());
@@ -366,7 +369,7 @@ mod tests {
             f.write_all(b"fn main() {}").unwrap(); // 12 bytes
         }
 
-        let stats = scan_path(dir.path()).unwrap();
+        let stats = scan_path(dir.path(), false).unwrap();
         assert_eq!(*stats.subdirs.get(&sub).unwrap(), 12);
     }
 
@@ -382,6 +385,7 @@ mod tests {
             dir.path().to_path_buf(),
             Arc::clone(&stats),
             Arc::clone(&progress),
+            false,
         );
 
         // Poll until complete (max 5 seconds).
@@ -407,7 +411,7 @@ mod tests {
             f.write_all(b"fn main() {}").unwrap(); // 12 bytes
         }
 
-        let stats = scan_path(dir.path()).unwrap();
+        let stats = scan_path(dir.path(), false).unwrap();
         // In all_entries, both pkg and pkg/src should have size 12
         let pkg_entry = stats.all_entries.iter().find(|e| e.path == sub).unwrap();
         assert_eq!(pkg_entry.size, 12);
@@ -428,7 +432,7 @@ mod tests {
             f1.write_all(b"hello").unwrap(); // 5 bytes
         }
 
-        let entries = scan_immediate(dir.path()).unwrap();
+        let entries = scan_immediate(dir.path(), false).unwrap();
         assert_eq!(entries.len(), 2);
 
         let file_entry = entries
