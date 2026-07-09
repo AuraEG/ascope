@@ -1018,39 +1018,44 @@ fn render_file_preview(f: &mut Frame, state: &AppState, area: Rect) {
             let mut rendered_high_res = false;
             if let Ok(mut guard) = state.last_rendered_image.lock() {
                 if let Some(ref mut cache) = *guard {
-                    rendered_high_res = true;
-                    // Skip cells to prevent Ratatui from rendering/clearing
-                    let buf = f.buffer_mut();
-                    for y in inner_area.top()..inner_area.bottom() {
-                        for x in inner_area.left()..inner_area.right() {
-                            buf.get_mut(x, y).set_skip(true);
-                        }
-                    }
-
-                    if cache.area != inner_area {
-                        use std::io::Write;
-                        let mut out = std::io::stdout();
-
-                        let _ = crossterm::queue!(out, crossterm::cursor::SavePosition);
-
-                        // Clear the terminal screen cells inside inner_area to erase old text
+                    if cache.path == entry.path {
+                        rendered_high_res = true;
+                        // Skip cells to prevent Ratatui from rendering/clearing
+                        let buf = f.buffer_mut();
                         for y in inner_area.top()..inner_area.bottom() {
-                            let _ =
-                                crossterm::queue!(out, crossterm::cursor::MoveTo(inner_area.x, y));
-                            let _ = out.write_all(" ".repeat(inner_area.width as usize).as_bytes());
+                            for x in inner_area.left()..inner_area.right() {
+                                buf.get_mut(x, y).set_skip(true);
+                            }
                         }
 
-                        // Move cursor back and print sequence
-                        let _ = crossterm::queue!(
-                            out,
-                            crossterm::cursor::MoveTo(inner_area.x, inner_area.y)
-                        );
-                        let _ = out.write_all(cache.sequence.as_bytes());
+                        if cache.area != inner_area {
+                            use std::io::Write;
+                            let mut out = std::io::stdout();
 
-                        let _ = crossterm::queue!(out, crossterm::cursor::RestorePosition);
-                        let _ = out.flush();
+                            let _ = crossterm::queue!(out, crossterm::cursor::SavePosition);
 
-                        cache.area = inner_area;
+                            // Clear the terminal screen cells inside inner_area to erase old text
+                            for y in inner_area.top()..inner_area.bottom() {
+                                let _ = crossterm::queue!(
+                                    out,
+                                    crossterm::cursor::MoveTo(inner_area.x, y)
+                                );
+                                let _ =
+                                    out.write_all(" ".repeat(inner_area.width as usize).as_bytes());
+                            }
+
+                            // Move cursor back and print sequence
+                            let _ = crossterm::queue!(
+                                out,
+                                crossterm::cursor::MoveTo(inner_area.x, inner_area.y)
+                            );
+                            let _ = out.write_all(cache.sequence.as_bytes());
+
+                            let _ = crossterm::queue!(out, crossterm::cursor::RestorePosition);
+                            let _ = out.flush();
+
+                            cache.area = inner_area;
+                        }
                     }
                 }
             }
@@ -1901,6 +1906,11 @@ static HELP_ITEMS: &[HelpItem] = &[
         context: "File Actions",
     },
     HelpItem {
+        key: ".",
+        desc: "Toggle hidden files & folders",
+        context: "File Actions",
+    },
+    HelpItem {
         key: "/",
         desc: "Fuzzy search files and directories",
         context: "Search",
@@ -1937,8 +1947,21 @@ static HELP_ITEMS: &[HelpItem] = &[
     },
 ];
 
-pub fn help_items_len() -> usize {
-    HELP_ITEMS.len()
+pub fn help_items_len(state: &AppState) -> usize {
+    let mut count = HELP_ITEMS.len();
+    if let Some(ref engine) = state.plugin_engine {
+        count += engine.keybindings.len();
+        if let Ok(dynamic_kbs) = engine.dynamic_keybindings.try_borrow() {
+            count += dynamic_kbs.len();
+        }
+    }
+    count
+}
+
+struct TempHelpItem {
+    key: String,
+    desc: String,
+    context: String,
 }
 
 fn render_help_modal(f: &mut Frame, state: &AppState) {
@@ -2002,7 +2025,47 @@ fn render_help_modal(f: &mut Frame, state: &AppState) {
         .height(1)
         .bottom_margin(1);
 
-    let rows: Vec<ratatui::widgets::Row> = HELP_ITEMS
+    // Build dynamic help items list
+    let mut items = Vec::new();
+    for item in HELP_ITEMS {
+        items.push(TempHelpItem {
+            key: item.key.to_string(),
+            desc: item.desc.to_string(),
+            context: item.context.to_string(),
+        });
+    }
+
+    if let Some(ref engine) = state.plugin_engine {
+        for kb in &engine.keybindings {
+            let mut key_str = kb.key.clone();
+            if let Some(ref modifier) = kb.modifier {
+                key_str = format!("{}+{}", modifier, key_str);
+            }
+            items.push(TempHelpItem {
+                key: key_str,
+                desc: format!("Plugin Event: {}", kb.event),
+                context: "Plugin".to_string(),
+            });
+        }
+        if let Ok(dynamic_kbs) = engine.dynamic_keybindings.try_borrow() {
+            for kb in &*dynamic_kbs {
+                let desc = if let Some(ref d) = kb.description {
+                    d.clone()
+                } else if kb.key.to_lowercase().contains("f") && kb.key.len() <= 7 {
+                    "Open Fzf Picker (Fuzzy File Finder)".to_string()
+                } else {
+                    format!("Dynamic Plugin Action ({})", kb.key)
+                };
+                items.push(TempHelpItem {
+                    key: kb.key.clone(),
+                    desc,
+                    context: "Plugin".to_string(),
+                });
+            }
+        }
+    }
+
+    let rows: Vec<ratatui::widgets::Row> = items
         .iter()
         .enumerate()
         .map(|(i, item)| {
@@ -2014,16 +2077,16 @@ fn render_help_modal(f: &mut Frame, state: &AppState) {
             };
 
             let key_span = Span::styled(
-                item.key,
+                &item.key,
                 if is_selected {
                     Style::default().fg(Color::Black).bold()
                 } else {
                     Style::default().fg(Color::Rgb(240, 200, 50)).bold() // Gold key highlight
                 },
             );
-            let desc_span = Span::raw(item.desc);
+            let desc_span = Span::raw(&item.desc);
             let ctx_span = Span::styled(
-                item.context,
+                &item.context,
                 if is_selected {
                     Style::default().fg(Color::Black)
                 } else {
@@ -2354,7 +2417,7 @@ fn split_icon_and_label(text: &str) -> (Option<&str>, &str) {
 }
 
 fn render_plugin_overlay(f: &mut Frame, state: &AppState) {
-    let modal_area = centered_rect(70, 50, f.size());
+    let modal_area = centered_rect(95, 90, f.size());
     f.render_widget(Clear, modal_area);
 
     let footer = Line::from(vec![
@@ -2383,10 +2446,25 @@ fn render_plugin_overlay(f: &mut Frame, state: &AppState) {
     let inner_area = block.inner(modal_area);
     f.render_widget(block, modal_area);
 
+    let (left_area, right_area) =
+        if let Some((ref path, ref lines)) = state.plugin_modal_preview_cache {
+            let split = Layout::default()
+                .direction(ratatui::layout::Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(inner_area);
+            (split[0], Some((path, lines, split[1])))
+        } else {
+            (inner_area, None)
+        };
+
     let chunks = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(1)])
-        .split(inner_area);
+        .constraints([
+            Constraint::Length(3), // Search Input
+            Constraint::Length(1), // Total Files Count Label
+            Constraint::Min(1),    // Selection List
+        ])
+        .split(left_area);
 
     // Prompt input
     let input_border_style = if state.plugin_modal_focused {
@@ -2395,10 +2473,31 @@ fn render_plugin_overlay(f: &mut Frame, state: &AppState) {
         Style::default().fg(Color::DarkGray)
     };
 
+    let home = std::env::var("HOME").unwrap_or_default();
+    let display_path = if !home.is_empty() && state.current_path.starts_with(&home) {
+        format!(
+            "~/{}",
+            state
+                .current_path
+                .strip_prefix(&home)
+                .unwrap_or(&state.current_path)
+                .to_string_lossy()
+        )
+    } else {
+        state.current_path.to_string_lossy().to_string()
+    };
+    let display_path = if display_path.ends_with('/') || display_path == "~" {
+        display_path
+    } else {
+        format!("{}/", display_path)
+    };
+
+    let search_title = format!(" 󰍉 {} ", display_path);
+
     let input_block = Block::default()
         .borders(Borders::ALL)
         .border_style(input_border_style)
-        .title(" 󰍉 Search / Filter ");
+        .title(search_title);
     let input_para = Paragraph::new(state.plugin_modal_input.as_str())
         .block(input_block)
         .style(Style::default().fg(Color::White));
@@ -2407,14 +2506,31 @@ fn render_plugin_overlay(f: &mut Frame, state: &AppState) {
     // Cursor for input
     if state.plugin_modal_focused {
         f.set_cursor(
-            chunks[0].x + 2 + state.plugin_modal_cursor_index as u16,
+            chunks[0].x + 1 + state.plugin_modal_cursor_index as u16,
             chunks[0].y + 1,
         );
     }
 
+    // Results file count label
+    let count_line = Line::from(vec![
+        Span::styled("   󰈞  Showing ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{}", state.plugin_modal_filtered_items.len()),
+            Style::default().fg(Color::Cyan).bold(),
+        ),
+        Span::styled(" of ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{}", state.plugin_modal_items.len()),
+            Style::default().fg(Color::White),
+        ),
+        Span::styled(" items", Style::default().fg(Color::DarkGray)),
+    ]);
+    let count_para = Paragraph::new(count_line);
+    f.render_widget(count_para, chunks[1]);
+
     // Results list
     let total_results = state.plugin_modal_filtered_items.len();
-    let list_height = chunks[1].height as usize;
+    let list_height = chunks[2].height as usize;
 
     let start_idx = if total_results <= list_height {
         0
@@ -2433,8 +2549,6 @@ fn render_plugin_overlay(f: &mut Frame, state: &AppState) {
     let end_idx = total_results.min(start_idx + list_height);
     let window = &state.plugin_modal_filtered_items[start_idx..end_idx];
 
-
-
     let list_items: Vec<ListItem> = window
         .iter()
         .enumerate()
@@ -2443,19 +2557,41 @@ fn render_plugin_overlay(f: &mut Frame, state: &AppState) {
             let is_selected = actual_idx == state.plugin_modal_selected_index;
 
             let (icon, rest) = split_icon_and_label(result.label.trim());
+            let path = Path::new(&result.value);
+            let is_dir = result.value.ends_with('/')
+                || result.label.contains("󰉋")
+                || result.label.contains("󱏒");
+            let entry_type = if is_dir {
+                EntryType::Directory
+            } else {
+                EntryType::File
+            };
+            let file_style = get_icon_style(path, &entry_type);
+            let file_color = file_style.fg.unwrap_or(Color::White);
+
+            let display_icon = if let Some(ic) = icon {
+                ic
+            } else if result.value == ".." {
+                "󱏒"
+            } else {
+                get_icon(path, &entry_type)
+            };
+
             let mut spans = vec![];
 
             if is_selected {
                 spans.push(Span::styled("▍ ", Style::default().fg(Color::Cyan)));
-                if let Some(ic) = icon {
-                    spans.push(Span::styled(format!("{} ", ic), Style::default().fg(Color::Yellow).bold()));
-                }
+                spans.push(Span::styled(
+                    format!("{} ", display_icon),
+                    Style::default().fg(file_color).bold(),
+                ));
                 spans.push(Span::styled(rest, Style::default().fg(Color::White).bold()));
             } else {
                 spans.push(Span::raw("  "));
-                if let Some(ic) = icon {
-                    spans.push(Span::styled(format!("{} ", ic), Style::default().fg(Color::Cyan)));
-                }
+                spans.push(Span::styled(
+                    format!("{} ", display_icon),
+                    Style::default().fg(file_color),
+                ));
                 spans.push(Span::styled(rest, Style::default().fg(Color::Gray)));
             }
 
@@ -2471,13 +2607,90 @@ fn render_plugin_overlay(f: &mut Frame, state: &AppState) {
 
     let list = List::new(list_items)
         .block(Block::default().borders(Borders::NONE))
-        .highlight_style(Style::default().bg(Color::Cyan).fg(Color::Black));
-    f.render_widget(list, chunks[1]);
-}
+        .highlight_style(Style::default());
+    f.render_widget(list, chunks[2]);
 
-// --------------------------------------------------------------------------
-// [SECTION] Tests
-// --------------------------------------------------------------------------
+    // Render Preview Pane if present
+    if let Some((path, lines, area)) = right_area {
+        let title = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let preview_block = Block::default()
+            .title(format!(" Preview: {title} "))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray));
+        let inner_preview = preview_block.inner(area);
+        f.render_widget(preview_block, area);
+
+        // If it's an image, render with half block or image renderers
+        let is_image = state.detect_preview_type(path) == crate::app::PreviewType::Image;
+
+        if is_image {
+            let mut rendered_high_res = false;
+            if let Ok(mut guard) = state.last_rendered_image.lock() {
+                if let Some(ref mut cache) = *guard {
+                    let buf = f.buffer_mut();
+                    for y in inner_preview.top()..inner_preview.bottom() {
+                        for x in inner_preview.left()..inner_preview.right() {
+                            buf.get_mut(x, y).set_skip(true);
+                        }
+                    }
+
+                    if cache.path == *path {
+                        rendered_high_res = true;
+                        if cache.area != inner_preview {
+                            if let Ok(mut log) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open("/home/ahmedashour/AuraEG/ascope/debug.log")
+                            {
+                                use std::io::Write as _;
+                                let _ = writeln!(log, "PRINTING SEQUENCE: path={:?}, inner_preview={:?}, cache.area={:?}", path, inner_preview, cache.area);
+                            }
+                            use std::io::Write;
+                            let mut out = std::io::stdout();
+
+                            let _ = crossterm::queue!(out, crossterm::cursor::SavePosition);
+
+                            for y in inner_preview.top()..inner_preview.bottom() {
+                                let _ = crossterm::queue!(
+                                    out,
+                                    crossterm::cursor::MoveTo(inner_preview.x, y)
+                                );
+                                let _ = out
+                                    .write_all(" ".repeat(inner_preview.width as usize).as_bytes());
+                            }
+
+                            let _ = crossterm::queue!(
+                                out,
+                                crossterm::cursor::MoveTo(inner_preview.x, inner_preview.y)
+                            );
+                            let _ = out.write_all(cache.sequence.as_bytes());
+
+                            let _ = crossterm::queue!(out, crossterm::cursor::RestorePosition);
+                            let _ = out.flush();
+
+                            cache.area = inner_preview;
+                        }
+                    } else {
+                        // The cache is for a different path, but since we set skip = true above, WezTerm keeps showing the old image until the new one arrives.
+                        rendered_high_res = true;
+                    }
+                }
+            }
+
+            if !rendered_high_res {
+                let preview = Paragraph::new(Text::from(lines.clone())).wrap(Wrap { trim: false });
+                f.render_widget(preview, inner_preview);
+            }
+        } else {
+            let preview = Paragraph::new(Text::from(lines.clone())).wrap(Wrap { trim: false });
+            f.render_widget(preview, inner_preview);
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

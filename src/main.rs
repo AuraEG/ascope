@@ -114,13 +114,14 @@ fn event_loop(
 
         if state.last_selection_time.elapsed().as_millis() > 50 {
             state.update_preview_cache(preview_w, preview_h);
-        } else {
-            // Poll async preview updates even if we don't fully refresh the cache,
-            // to make sure background workers can still deliver results.
-            state.poll_preview_updates();
         }
+        state.poll_preview_updates();
         state.poll_search_updates();
         state.poll_shell_updates();
+        if state.needs_terminal_clear {
+            let _ = terminal.clear();
+            state.needs_terminal_clear = false;
+        }
         terminal.draw(|f| ui::widgets::render_dashboard(f, &state))?;
 
         match events.next()? {
@@ -311,11 +312,11 @@ fn event_loop(
                             state.show_help = false;
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            let count = crate::ui::widgets::help_items_len();
+                            let count = crate::ui::widgets::help_items_len(&state);
                             state.help_selected_index = (state.help_selected_index + 1) % count;
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
-                            let count = crate::ui::widgets::help_items_len();
+                            let count = crate::ui::widgets::help_items_len(&state);
                             state.help_selected_index =
                                 (state.help_selected_index + count - 1) % count;
                         }
@@ -601,6 +602,9 @@ fn event_loop(
                                 }
                                 _ => {}
                             }
+                        }
+                        if state.modal_mode == ascope::app::ModalMode::PluginOverlay {
+                            state.update_plugin_modal_preview();
                         }
                     } else if state.modal_mode == ascope::app::ModalMode::CommandPalette {
                         if state.command_palette_focused {
@@ -1407,6 +1411,7 @@ fn event_loop(
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
                         KeyCode::Char('/') => state.toggle_search_mode(),
+                        KeyCode::Char('.') => state.toggle_hidden(),
                         KeyCode::Down | KeyCode::Char('j') => state.move_selection(1),
                         KeyCode::Char('k')
                             if key
@@ -1551,7 +1556,7 @@ fn event_loop(
     }
 
     ascope::plugin::engine::clear_current_app_state();
-    Ok(state.current_path)
+    Ok(state.current_path.clone())
 }
 
 // --------------------------------------------------------------------------
@@ -1562,7 +1567,7 @@ fn main() {
     let args = Args::parse();
 
     if args.stats {
-        match fs::walker::scan_path(&args.path) {
+        match fs::walker::scan_path(&args.path, false) {
             Ok(stats) => {
                 if args.json {
                     println!("{}", serde_json::to_string_pretty(&stats).unwrap());

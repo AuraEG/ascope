@@ -161,6 +161,8 @@ pub struct AppState {
     pub rename_input: String,
     /// Whether inline rename mode is active
     pub rename_mode: bool,
+    /// Whether hidden files and folders should be displayed
+    pub show_hidden: bool,
     /// Target paths for deletion confirmation
     pub delete_targets: Vec<PathBuf>,
     /// Whether full-screen help modal is open
@@ -197,6 +199,8 @@ pub struct AppState {
     pub shell_result_tx: std::sync::mpsc::Sender<ShellResult>,
     pub shell_result_rx: std::sync::mpsc::Receiver<ShellResult>,
     pub pending_key_sequence: String,
+    pub plugin_modal_preview_cache: Option<(PathBuf, Vec<Line<'static>>)>,
+    pub needs_terminal_clear: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -270,6 +274,7 @@ impl AppState {
     #[allow(clippy::type_complexity)]
     fn prepare_directory_load(
         path: &std::path::Path,
+        show_hidden: bool,
     ) -> (
         Arc<Mutex<PathStats>>,
         Arc<Mutex<ScanProgress>>,
@@ -280,7 +285,7 @@ impl AppState {
         let scan_progress = Arc::new(Mutex::new(ScanProgress::Complete));
 
         let git_ctx = GitContext::read(path);
-        let immediate_entries = scan_immediate(path).unwrap_or_default();
+        let immediate_entries = scan_immediate(path, show_hidden).unwrap_or_default();
         (active_stats, scan_progress, git_ctx, immediate_entries)
     }
 
@@ -289,7 +294,7 @@ impl AppState {
     /// the background thread finishes.
     pub fn new(root: PathBuf) -> Self {
         let (active_stats, scan_progress, git_ctx, immediate_entries) =
-            Self::prepare_directory_load(&root);
+            Self::prepare_directory_load(&root, false);
 
         let mut config = crate::config::Config::load();
         if !config.recent.contains(&root) {
@@ -333,132 +338,233 @@ impl AppState {
                     task = newer;
                 }
 
-                // Process the task
-                let is_pdf = task
-                    .path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|s| s.to_lowercase())
-                    == Some("pdf".to_string());
-                let target_path = if is_pdf {
-                    match crate::preview::extract_pdf_first_page(&task.path) {
-                        Ok(p) => p,
-                        Err(err) => {
-                            let lines = vec![Line::from(format!("[x] PDF preview error: {err}"))];
-                            let _ = tx_clone.send((task.path, task.query, lines, None));
-                            continue;
-                        }
-                    }
-                } else {
-                    task.path.clone()
-                };
+                let tx_clone = tx_clone.clone();
+                let task_path = task.path.clone();
+                let task_query = task.query.clone();
 
-                match task.protocol {
-                    crate::preview::TerminalProtocol::HalfBlock => {
-                        if *crate::preview::HAS_CHAFA {
-                            if let Ok(lines) = crate::preview::render_chafa_symbols(
-                                &target_path,
-                                task.width,
-                                task.height,
-                            ) {
+                // Validate zero dimensions early to prevent library panics (e.g. image crate thumbnail/resize)
+                if task.width == 0 || task.height == 0 {
+                    let _ = tx_clone.send((task_path, task_query, vec![], None));
+                    continue;
+                }
+
+                let tx_clone_outer = tx_clone.clone();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    // Process the task
+                    let is_img = if let Some(ext) = task.path.extension().and_then(|e| e.to_str()) {
+                        matches!(
+                            ext.to_lowercase().as_str(),
+                            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "ico" | "pdf"
+                        )
+                    } else {
+                        false
+                    };
+
+                    if !is_img {
+                        let lines = crate::ui::widgets::build_preview_lines_focused(
+                            &task.path,
+                            &task.query,
+                            None,
+                        );
+                        let _ = tx_clone.send((task.path, task.query, lines, None));
+                        return;
+                    }
+
+                    let is_pdf = task
+                        .path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|s| s.to_lowercase())
+                        == Some("pdf".to_string());
+                    let target_path = if is_pdf {
+                        match crate::preview::extract_pdf_first_page(&task.path) {
+                            Ok(p) => p,
+                            Err(err) => {
+                                let lines =
+                                    vec![Line::from(format!("[x] PDF preview error: {err}"))];
                                 let _ = tx_clone.send((task.path, task.query, lines, None));
-                                continue;
+                                return;
                             }
                         }
-                        if let Ok(img) = image::open(&target_path) {
-                            let lines =
-                                crate::preview::render_half_block(&img, task.width, task.height);
-                            let _ = tx_clone.send((task.path, task.query, lines, None));
-                        } else {
+                    } else {
+                        task.path.clone()
+                    };
+
+                    match task.protocol {
+                        crate::preview::TerminalProtocol::HalfBlock => {
+                            if *crate::preview::HAS_CHAFA {
+                                if let Ok(lines) = crate::preview::render_chafa_symbols(
+                                    &target_path,
+                                    task.width,
+                                    task.height,
+                                ) {
+                                    let _ = tx_clone.send((task.path, task.query, lines, None));
+                                    return;
+                                }
+                            }
+                            if let Ok(img) = image::open(&target_path) {
+                                let lines = crate::preview::render_half_block(
+                                    &img,
+                                    task.width,
+                                    task.height,
+                                );
+                                let _ = tx_clone.send((task.path, task.query, lines, None));
+                            } else {
+                                let lines = vec![Line::from("[Error loading image]")];
+                                let _ = tx_clone.send((task.path, task.query, lines, None));
+                            }
+                        }
+                        crate::preview::TerminalProtocol::Kitty => {
+                            let display_h = task.height.saturating_sub(1);
+                            if display_h == 0 {
+                                let lines = vec![Line::from("[Error loading image]")];
+                                let _ = tx_clone.send((task.path, task.query, lines, None));
+                                return;
+                            }
+                            if let Ok(img) = image::open(&target_path) {
+                                let max_cols = task.width.saturating_sub(1).max(1);
+                                let max_rows = display_h.saturating_sub(1).max(1);
+                                let resized =
+                                    img.thumbnail(max_cols as u32 * 12, max_rows as u32 * 24);
+                                let mut png_bytes = Vec::new();
+                                let mut cursor = std::io::Cursor::new(&mut png_bytes);
+                                if resized
+                                    .write_to(&mut cursor, image::ImageFormat::Png)
+                                    .is_ok()
+                                {
+                                    let (w, h) = resized.dimensions();
+                                    let cols = (w / 12).max(1u32) as u16;
+                                    let rows = (h / 24).max(1u32) as u16;
+                                    let sequence = crate::preview::build_kitty_sequence(
+                                        &png_bytes, cols, rows,
+                                    );
+                                    let cache = ImageRenderCache {
+                                        path: task.path.clone(),
+                                        area: ratatui::layout::Rect::new(
+                                            0, 0, task.width, display_h,
+                                        ),
+                                        sequence,
+                                        protocol: task.protocol,
+                                    };
+                                    let _ =
+                                        tx_clone.send((task.path, task.query, vec![], Some(cache)));
+                                    return;
+                                }
+                            }
                             let lines = vec![Line::from("[Error loading image]")];
                             let _ = tx_clone.send((task.path, task.query, lines, None));
                         }
-                    }
-                    crate::preview::TerminalProtocol::Kitty => {
-                        let display_h = task.height.saturating_sub(1);
-                        if let Ok(img) = image::open(&target_path) {
-                            let resized =
-                                img.thumbnail(task.width as u32 * 12, display_h as u32 * 24);
-                            let mut png_bytes = Vec::new();
-                            let mut cursor = std::io::Cursor::new(&mut png_bytes);
-                            if resized
-                                .write_to(&mut cursor, image::ImageFormat::Png)
-                                .is_ok()
-                            {
-                                let (w, h) = resized.dimensions();
-                                let cols = (w / 12).max(1u32) as u16;
-                                let rows = (h / 24).max(1u32) as u16;
-                                let sequence =
-                                    crate::preview::build_kitty_sequence(&png_bytes, cols, rows);
-                                let cache = ImageRenderCache {
-                                    path: task.path.clone(),
-                                    area: ratatui::layout::Rect::new(0, 0, task.width, display_h),
-                                    sequence,
-                                    protocol: task.protocol,
-                                };
-                                let _ = tx_clone.send((task.path, task.query, vec![], Some(cache)));
-                                continue;
+                        crate::preview::TerminalProtocol::Iterm2 => {
+                            let display_h = task.height.saturating_sub(1);
+                            if display_h == 0 {
+                                let lines = vec![Line::from("[Error loading image]")];
+                                let _ = tx_clone.send((task.path, task.query, lines, None));
+                                return;
                             }
-                        }
-                        let lines = vec![Line::from("[Error loading image]")];
-                        let _ = tx_clone.send((task.path, task.query, lines, None));
-                    }
-                    crate::preview::TerminalProtocol::Iterm2 => {
-                        let display_h = task.height.saturating_sub(1);
-                        if let Ok(img) = image::open(&target_path) {
-                            let resized =
-                                img.thumbnail(task.width as u32 * 16, display_h as u32 * 32);
-                            let mut jpeg_bytes = Vec::new();
-                            let mut cursor = std::io::Cursor::new(&mut jpeg_bytes);
-                            if resized
-                                .write_to(&mut cursor, image::ImageFormat::Jpeg)
-                                .is_ok()
-                            {
-                                let (w, h) = resized.dimensions();
-                                let cols = (w / 16).max(1u32) as u16;
-                                let rows = (h / 32).max(1u32) as u16;
-                                let sequence =
-                                    crate::preview::build_iterm2_sequence(&jpeg_bytes, cols, rows);
-                                let cache = ImageRenderCache {
-                                    path: task.path.clone(),
-                                    area: ratatui::layout::Rect::new(0, 0, task.width, display_h),
-                                    sequence,
-                                    protocol: task.protocol,
+                            if let Ok(img) = image::open(&target_path) {
+                                let max_cols = task.width.saturating_sub(1).max(1);
+                                let max_rows = display_h.saturating_sub(1).max(1);
+                                let resized =
+                                    img.thumbnail(max_cols as u32 * 16, max_rows as u32 * 32);
+                                let mut img_bytes = Vec::new();
+                                // Try Jpeg first for optimal size/quality in WezTerm, fallback to Png for transparent images
+                                let write_ok = {
+                                    let mut cursor = std::io::Cursor::new(&mut img_bytes);
+                                    resized
+                                        .write_to(&mut cursor, image::ImageFormat::Jpeg)
+                                        .is_ok()
                                 };
-                                let _ = tx_clone.send((task.path, task.query, vec![], Some(cache)));
-                                continue;
-                            }
-                        }
-                        let lines = vec![Line::from("[Error loading image]")];
-                        let _ = tx_clone.send((task.path, task.query, lines, None));
-                    }
-                    crate::preview::TerminalProtocol::Sixel => {
-                        let display_h = task.height.saturating_sub(1);
-                        if *crate::preview::HAS_CHAFA {
-                            if let Ok(sequence) = crate::preview::build_sixel_sequence_via_chafa(
-                                &target_path,
-                                task.width,
-                                display_h,
-                            ) {
-                                let cache = ImageRenderCache {
-                                    path: task.path.clone(),
-                                    area: ratatui::layout::Rect::new(0, 0, task.width, display_h),
-                                    sequence,
-                                    protocol: task.protocol,
+                                let write_ok = if !write_ok {
+                                    img_bytes.clear();
+                                    let mut cursor = std::io::Cursor::new(&mut img_bytes);
+                                    resized
+                                        .write_to(&mut cursor, image::ImageFormat::Png)
+                                        .is_ok()
+                                } else {
+                                    true
                                 };
-                                let _ = tx_clone.send((task.path, task.query, vec![], Some(cache)));
-                                continue;
+
+                                if write_ok {
+                                    let (w, h) = resized.dimensions();
+                                    let cols = (w / 16).max(1u32) as u16;
+                                    let rows = (h / 32).max(1u32) as u16;
+                                    let sequence = crate::preview::build_iterm2_sequence(
+                                        &img_bytes, cols, rows,
+                                    );
+                                    let cache = ImageRenderCache {
+                                        path: task.path.clone(),
+                                        area: ratatui::layout::Rect::new(
+                                            0, 0, task.width, display_h,
+                                        ),
+                                        sequence,
+                                        protocol: task.protocol,
+                                    };
+                                    let _ =
+                                        tx_clone.send((task.path, task.query, vec![], Some(cache)));
+                                    return;
+                                }
                             }
-                        }
-                        if let Ok(img) = image::open(&target_path) {
-                            let lines =
-                                crate::preview::render_half_block(&img, task.width, task.height);
-                            let _ = tx_clone.send((task.path, task.query, lines, None));
-                        } else {
                             let lines = vec![Line::from("[Error loading image]")];
                             let _ = tx_clone.send((task.path, task.query, lines, None));
                         }
+                        crate::preview::TerminalProtocol::Sixel => {
+                            let display_h = task.height.saturating_sub(1);
+                            if display_h == 0 {
+                                let lines = vec![Line::from("[Error loading image]")];
+                                let _ = tx_clone.send((task.path, task.query, lines, None));
+                                return;
+                            }
+                            if *crate::preview::HAS_CHAFA {
+                                let max_cols = task.width.saturating_sub(1).max(1);
+                                let max_rows = display_h.saturating_sub(1).max(1);
+                                if let Ok(sequence) = crate::preview::build_sixel_sequence_via_chafa(
+                                    &target_path,
+                                    max_cols,
+                                    max_rows,
+                                ) {
+                                    let cache = ImageRenderCache {
+                                        path: task.path.clone(),
+                                        area: ratatui::layout::Rect::new(
+                                            0, 0, task.width, display_h,
+                                        ),
+                                        sequence,
+                                        protocol: task.protocol,
+                                    };
+                                    let _ =
+                                        tx_clone.send((task.path, task.query, vec![], Some(cache)));
+                                    return;
+                                }
+                            }
+                            if let Ok(img) = image::open(&target_path) {
+                                let lines = crate::preview::render_half_block(
+                                    &img,
+                                    task.width,
+                                    task.height,
+                                );
+                                let _ = tx_clone.send((task.path, task.query, lines, None));
+                            } else {
+                                let lines = vec![Line::from("[Error loading image]")];
+                                let _ = tx_clone.send((task.path, task.query, lines, None));
+                            }
+                        }
                     }
+                }));
+
+                if let Err(panic_err) = result {
+                    if let Ok(mut log) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("/home/ahmedashour/AuraEG/ascope/debug.log")
+                    {
+                        use std::io::Write as _;
+                        let _ = writeln!(
+                            log,
+                            "Worker thread panicked on path {:?}: {:?}",
+                            task_path, panic_err
+                        );
+                    }
+                    let lines = vec![Line::from("[Preview error: worker thread panicked]")];
+                    let _ = tx_clone_outer.send((task_path, task_query, lines, None));
                 }
             }
         });
@@ -496,6 +602,7 @@ impl AppState {
             rename_target: None,
             rename_input: String::new(),
             rename_mode: false,
+            show_hidden: false,
             delete_targets: Vec::new(),
             show_help: false,
             help_selected_index: 0,
@@ -529,6 +636,8 @@ impl AppState {
             shell_result_tx,
             shell_result_rx,
             pending_key_sequence: String::new(),
+            plugin_modal_preview_cache: None,
+            needs_terminal_clear: false,
         };
 
         // Discovered project commands
@@ -573,7 +682,7 @@ impl AppState {
             let _ = engine.trigger_event("on_startup", String::new());
         }
         state.plugin_engine = plugin_engine;
-
+        crate::plugin::engine::clear_current_app_state();
         state
     }
 
@@ -679,13 +788,41 @@ impl AppState {
     /// Poll and apply asynchronous image/PDF preview updates.
     pub fn poll_preview_updates(&mut self) {
         while let Ok((path, query, lines, cache)) = self.preview_rx.try_recv() {
-            let selected = self.selected_item().map(|x| x.path);
-            let current_query = self.navigation.filter_query().unwrap_or("").to_string();
+            if self.modal_mode == ModalMode::PluginOverlay {
+                if let Some(selected_item) = self
+                    .plugin_modal_filtered_items
+                    .get(self.plugin_modal_selected_index)
+                {
+                    let selected_path = self.current_path.join(&selected_item.value);
+                    let equal = path == selected_path;
+                    if let Ok(mut log) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("/home/ahmedashour/AuraEG/ascope/debug.log")
+                    {
+                        use std::io::Write as _;
+                        let _ = writeln!(
+                            log,
+                            "path: {:?}, selected_path: {:?}, equal: {}, has_cache: {}",
+                            path,
+                            selected_path,
+                            equal,
+                            cache.is_some()
+                        );
+                    }
+                    if path == selected_path {
+                        self.plugin_modal_preview_cache = Some((path.clone(), lines.clone()));
+                        *self.last_rendered_image.lock().unwrap() = cache;
+                    }
+                }
+            } else {
+                let selected = self.selected_item().map(|x| x.path);
+                let current_query = self.navigation.filter_query().unwrap_or("").to_string();
 
-            // Only apply the preview if it matches the currently highlighted item and search query
-            if Some(&path) == selected.as_ref() && current_query == query {
-                self.preview_cache = Some((path, query, None, lines));
-                *self.last_rendered_image.lock().unwrap() = cache;
+                if Some(&path) == selected.as_ref() && current_query == query {
+                    self.preview_cache = Some((path, query, None, lines));
+                    *self.last_rendered_image.lock().unwrap() = cache;
+                }
             }
         }
     }
@@ -731,6 +868,9 @@ impl AppState {
     }
 
     pub fn update_preview_cache(&mut self, width: u16, height: u16) {
+        if self.modal_mode == ModalMode::PluginOverlay {
+            return;
+        }
         // Poll for asynchronous preview results first
         self.poll_preview_updates();
         // Poll for search updates
@@ -846,7 +986,7 @@ impl AppState {
                         .iter()
                         .any(|e| e.path.parent() == Some(&path));
                     if !has_children {
-                        if let Ok(children) = scan_immediate(&path) {
+                        if let Ok(children) = scan_immediate(&path, self.show_hidden) {
                             self.all_entries.extend(children);
                         }
                     }
@@ -871,7 +1011,7 @@ impl AppState {
                 self.size_popup_stats = Some(stats.clone());
                 self.size_popup_progress = Some(progress.clone());
 
-                crate::fs::walker::scan_path_async(path, stats, progress);
+                crate::fs::walker::scan_path_async(path, stats, progress, self.show_hidden);
             } else {
                 self.notification = Some((
                     "Cannot scan size: selected item is a file (must select a folder)".to_string(),
@@ -973,7 +1113,7 @@ impl AppState {
             if target.entry_type == EntryType::Directory {
                 let path = target.path;
                 let (active_stats, scan_progress, git_ctx, immediate_entries) =
-                    Self::prepare_directory_load(&path);
+                    Self::prepare_directory_load(&path, self.show_hidden);
 
                 self.current_path = path.clone();
                 self.active_stats = active_stats;
@@ -1003,7 +1143,7 @@ impl AppState {
         if let Some(parent) = self.current_path.parent() {
             let path = parent.to_path_buf();
             let (active_stats, scan_progress, git_ctx, immediate_entries) =
-                Self::prepare_directory_load(&path);
+                Self::prepare_directory_load(&path, self.show_hidden);
 
             self.current_path = path.clone();
             self.active_stats = active_stats;
@@ -1025,6 +1165,26 @@ impl AppState {
                 let _ = engine.trigger_event("on_enter", path.to_string_lossy().to_string());
             }
         }
+    }
+
+    /// Toggle the visibility of hidden files and folders, rescanning the active directory.
+    pub fn toggle_hidden(&mut self) {
+        self.show_hidden = !self.show_hidden;
+        let path = self.current_path.clone();
+        let (active_stats, scan_progress, git_ctx, immediate_entries) =
+            Self::prepare_directory_load(&path, self.show_hidden);
+
+        self.active_stats = active_stats;
+        self.scan_progress = scan_progress;
+        self.git_ctx = git_ctx;
+        self.navigation.update_items(immediate_entries.clone());
+        self.navigation.set_cursor(0);
+        self.navigation.clear_expanded();
+        self.navigation.set_filter(None, &[]);
+        self.all_entries = immediate_entries;
+        self.scan_applied = false;
+        self.preview_cache = None;
+        self.reset_selection_timeout();
     }
 
     /// Save the active state values into the corresponding Tab struct inside self.tabs.
@@ -1080,7 +1240,7 @@ impl AppState {
         self.save_active_tab();
 
         let (active_stats, scan_progress, git_ctx, immediate_entries) =
-            Self::prepare_directory_load(&path);
+            Self::prepare_directory_load(&path, self.show_hidden);
 
         let new_tab = Tab {
             current_path: path,
@@ -1218,7 +1378,7 @@ impl AppState {
     /// Jump to a specific directory path inside the active tab.
     pub fn jump_to_path(&mut self, path: PathBuf) {
         let (active_stats, scan_progress, git_ctx, immediate_entries) =
-            Self::prepare_directory_load(&path);
+            Self::prepare_directory_load(&path, self.show_hidden);
 
         self.current_path = path.clone();
         self.active_stats = active_stats;
@@ -1737,6 +1897,53 @@ impl AppState {
                 .collect();
         }
         self.plugin_modal_selected_index = 0;
+        self.update_plugin_modal_preview();
+    }
+
+    pub fn update_plugin_modal_preview(&mut self) {
+        if let Some(selected_item) = self
+            .plugin_modal_filtered_items
+            .get(self.plugin_modal_selected_index)
+        {
+            let path = self.current_path.join(&selected_item.value);
+            if path.is_file() {
+                // Initialize cache with loading placeholder
+                self.plugin_modal_preview_cache = Some((
+                    path.clone(),
+                    vec![Line::from(ratatui::prelude::Span::styled(
+                        "[Loading preview...]",
+                        ratatui::prelude::Style::default().fg(ratatui::prelude::Color::DarkGray),
+                    ))],
+                ));
+                *self.last_rendered_image.lock().unwrap() = None;
+
+                let protocol = crate::preview::detect_protocol();
+                let (cols, rows) = if let Ok(size) = crossterm::terminal::size() {
+                    (size.0, size.1)
+                } else {
+                    (80, 24)
+                };
+                let modal_w = cols * 95 / 100;
+                let modal_h = rows * 90 / 100;
+                let inner_w = modal_w.saturating_sub(2);
+                let inner_h = modal_h.saturating_sub(2);
+                let right_w = inner_w / 2;
+                let preview_w = right_w.saturating_sub(2);
+                let preview_h = inner_h.saturating_sub(2);
+
+                let task = PreviewTask {
+                    path: path.clone(),
+                    query: self.plugin_modal_input.clone(),
+                    width: preview_w,
+                    height: preview_h,
+                    protocol,
+                };
+                let _ = self.worker_tx.send(task);
+                return;
+            }
+        }
+        self.plugin_modal_preview_cache = None;
+        *self.last_rendered_image.lock().unwrap() = None;
     }
 
     pub fn update_command_palette_results(&mut self) {

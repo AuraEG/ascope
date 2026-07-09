@@ -46,7 +46,7 @@ local function zoxide_query()
     end)
 end
 
-ascope.register_key(key, zoxide_query)
+ascope.register_key(key, zoxide_query, "Open Zoxide Directory Switcher")
 
 ascope.on("on_enter", function(path)
     ascope.exec_shell("zoxide", {"add", path}, function() end)
