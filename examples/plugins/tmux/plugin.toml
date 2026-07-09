@@ -1,0 +1,8 @@
+[plugin]
+name = "tmux"
+version = "0.1.0"
+author = "Ahmed Ashour"
+description = "Open files and folders in tmux splits/windows"
+
+[config]
+key_binding = "alt-t"
