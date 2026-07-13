@@ -348,22 +348,55 @@ impl PluginEngine {
                 let item_tbl: Table = items_table.get(i)?;
                 let label: String = item_tbl.get("label")?;
                 let value: String = item_tbl.get("value")?;
-                items.push(crate::app::PluginOverlayItem { label, value });
+                let tab: Option<String> = item_tbl.get("tab").ok();
+                let icon: Option<String> = item_tbl.get("icon").ok();
+                items.push(crate::app::PluginOverlayItem {
+                    label,
+                    value,
+                    tab,
+                    icon,
+                });
+            }
+
+            let tabs_table: Option<Table> = opts.get("tabs").ok();
+            let mut tabs = Vec::new();
+            if let Some(tbl) = tabs_table {
+                let t_len = tbl.len()?;
+                for i in 1..=t_len {
+                    let val: String = tbl.get(i)?;
+                    tabs.push(val);
+                }
             }
 
             let on_select: Function = opts.get("on_select")?;
             let key = lua.create_registry_value(on_select)?;
 
+            let show_input: bool = opts
+                .get::<_, Option<bool>>("show_input")
+                .ok()
+                .flatten()
+                .unwrap_or(true);
+            let subtitle: Option<String> = opts.get("subtitle").ok();
+            let width: u16 = opts.get("width").unwrap_or(95);
+            let height: u16 = opts.get("height").unwrap_or(90);
+            let fixed: bool = opts.get("fixed").unwrap_or(false);
+
             with_app_state_mut(|state| {
                 state.modal_mode = crate::app::ModalMode::PluginOverlay;
                 state.plugin_modal_title = title;
-                state.plugin_modal_items = items.clone();
-                state.plugin_modal_filtered_items = items;
+                state.plugin_modal_items = items;
                 state.plugin_modal_input.clear();
                 state.plugin_modal_selected_index = 0;
                 state.plugin_modal_cursor_index = 0;
                 state.plugin_modal_focused = true;
-                state.update_plugin_modal_preview();
+                state.plugin_modal_show_input = show_input;
+                state.plugin_modal_subtitle = subtitle;
+                state.plugin_modal_width = width;
+                state.plugin_modal_height = height;
+                state.plugin_modal_fixed = fixed;
+                state.plugin_modal_tabs = tabs;
+                state.plugin_modal_active_tab_index = 0;
+                state.update_plugin_modal_filtering();
             });
 
             with_app_state_mut(|state| {
@@ -522,6 +555,27 @@ impl PluginEngine {
             },
         )?;
         ascope_api.set("register_key", register_key_fn)?;
+
+        let set_dashboard_info_fn =
+            lua.create_function(|_, (key, title, lines): (String, String, Vec<String>)| {
+                let _ = with_app_state_mut(|state| {
+                    if let Ok(mut map) = state.dashboard_infos.lock() {
+                        map.insert(key, (title, lines));
+                    }
+                });
+                Ok(())
+            })?;
+        ascope_api.set("set_dashboard_info", set_dashboard_info_fn)?;
+
+        let remove_dashboard_info_fn = lua.create_function(|_, key: String| {
+            let _ = with_app_state_mut(|state| {
+                if let Ok(mut map) = state.dashboard_infos.lock() {
+                    map.remove(&key);
+                }
+            });
+            Ok(())
+        })?;
+        ascope_api.set("remove_dashboard_info", remove_dashboard_info_fn)?;
 
         let config_tbl = lua.create_table()?;
         ascope_api.set("config", config_tbl)?;

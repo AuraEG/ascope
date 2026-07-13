@@ -413,6 +413,23 @@ fn event_loop(
                                             (state.plugin_modal_selected_index + 1) % len;
                                     }
                                 }
+                                KeyCode::Tab => {
+                                    if !state.plugin_modal_tabs.is_empty() {
+                                        state.plugin_modal_active_tab_index =
+                                            (state.plugin_modal_active_tab_index + 1)
+                                                % state.plugin_modal_tabs.len();
+                                        state.update_plugin_modal_filtering();
+                                    }
+                                }
+                                KeyCode::BackTab => {
+                                    if !state.plugin_modal_tabs.is_empty() {
+                                        let t_len = state.plugin_modal_tabs.len();
+                                        state.plugin_modal_active_tab_index =
+                                            (state.plugin_modal_active_tab_index + t_len - 1)
+                                                % t_len;
+                                        state.update_plugin_modal_filtering();
+                                    }
+                                }
                                 KeyCode::Left => {
                                     if state.plugin_modal_cursor_index > 0 {
                                         state.plugin_modal_cursor_index -= 1;
@@ -492,6 +509,23 @@ fn event_loop(
                             }
                         } else {
                             match key.code {
+                                KeyCode::Tab => {
+                                    if !state.plugin_modal_tabs.is_empty() {
+                                        state.plugin_modal_active_tab_index =
+                                            (state.plugin_modal_active_tab_index + 1)
+                                                % state.plugin_modal_tabs.len();
+                                        state.update_plugin_modal_filtering();
+                                    }
+                                }
+                                KeyCode::BackTab => {
+                                    if !state.plugin_modal_tabs.is_empty() {
+                                        let t_len = state.plugin_modal_tabs.len();
+                                        state.plugin_modal_active_tab_index =
+                                            (state.plugin_modal_active_tab_index + t_len - 1)
+                                                % t_len;
+                                        state.update_plugin_modal_filtering();
+                                    }
+                                }
                                 KeyCode::Esc => {
                                     state.modal_mode = ascope::app::ModalMode::None;
                                     if let Some(ref engine) = state.plugin_engine {

@@ -822,15 +822,33 @@ fn render_directory_dashboard(f: &mut Frame, state: &AppState, area: Rect, path:
     f.render_widget(block, area);
 
     // Layout chunks
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+    let has_plugins = state
+        .dashboard_infos
+        .lock()
+        .map(|m| !m.is_empty())
+        .unwrap_or(false);
+    let constraints = if has_plugins {
+        vec![
+            Constraint::Length(3), // Header
+            Constraint::Length(4), // Summary
+            Constraint::Length(7), // Top Files
+            Constraint::Length(7), // File Types
+            Constraint::Min(0),    // Plugin Dashboard Widgets
+            Constraint::Length(1), // Footer notice
+        ]
+    } else {
+        vec![
             Constraint::Length(3), // Header
             Constraint::Length(4), // Summary
             Constraint::Length(7), // Top Files
             Constraint::Min(0),    // File Types
             Constraint::Length(1), // Footer notice
-        ])
+        ]
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(inner_area);
 
     // Header
@@ -946,7 +964,29 @@ fn render_directory_dashboard(f: &mut Frame, state: &AppState, area: Rect, path:
             Style::default().fg(Color::DarkGray),
         ),
     ]);
-    f.render_widget(Paragraph::new(footer_text), chunks[4]);
+
+    if has_plugins {
+        let mut plugin_items = Vec::new();
+        if let Ok(map) = state.dashboard_infos.lock() {
+            for (_, (title, lines)) in map.iter() {
+                plugin_items.push(Line::from("")); // Spacer before section
+                plugin_items.push(Line::from(Span::styled(
+                    format!("  {} ", title),
+                    Style::default().fg(Color::LightCyan).bold(),
+                )));
+                for line in lines {
+                    plugin_items.push(Line::from(vec![
+                        Span::styled("    ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(line.clone(), Style::default().fg(Color::Gray)),
+                    ]));
+                }
+            }
+        }
+        f.render_widget(Paragraph::new(plugin_items), chunks[4]);
+        f.render_widget(Paragraph::new(footer_text), chunks[5]);
+    } else {
+        f.render_widget(Paragraph::new(footer_text), chunks[4]);
+    }
 }
 
 fn render_size_bars(f: &mut Frame, state: &AppState, area: Rect) {
@@ -2417,7 +2457,19 @@ fn split_icon_and_label(text: &str) -> (Option<&str>, &str) {
 }
 
 fn render_plugin_overlay(f: &mut Frame, state: &AppState) {
-    let modal_area = centered_rect(95, 90, f.size());
+    let modal_area = if state.plugin_modal_fixed {
+        centered_rect_fixed(
+            state.plugin_modal_width,
+            state.plugin_modal_height,
+            f.size(),
+        )
+    } else {
+        centered_rect(
+            state.plugin_modal_width,
+            state.plugin_modal_height,
+            f.size(),
+        )
+    };
     f.render_widget(Clear, modal_area);
 
     let footer = Line::from(vec![
@@ -2457,58 +2509,137 @@ fn render_plugin_overlay(f: &mut Frame, state: &AppState) {
             (inner_area, None)
         };
 
+    let mut constraints = Vec::new();
+
+    let subtitle_idx = if !state.plugin_modal_show_input && state.plugin_modal_subtitle.is_some() {
+        let idx = constraints.len();
+        constraints.push(Constraint::Length(1));
+        Some(idx)
+    } else {
+        None
+    };
+
+    let tabs_idx = if !state.plugin_modal_tabs.is_empty() {
+        let idx = constraints.len();
+        constraints.push(Constraint::Length(2));
+        Some(idx)
+    } else {
+        None
+    };
+
+    let input_idx = if state.plugin_modal_show_input {
+        let idx = constraints.len();
+        constraints.push(Constraint::Length(3));
+        Some(idx)
+    } else {
+        None
+    };
+
+    let count_idx = constraints.len();
+    constraints.push(Constraint::Length(1));
+
+    let list_idx = constraints.len();
+    constraints.push(Constraint::Min(1));
+
     let chunks = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Search Input
-            Constraint::Length(1), // Total Files Count Label
-            Constraint::Min(1),    // Selection List
-        ])
+        .constraints(constraints)
         .split(left_area);
 
+    let input_chunk = input_idx.map(|idx| chunks[idx]);
+    let subtitle_chunk = subtitle_idx.map(|idx| chunks[idx]);
+    let count_chunk = Some(chunks[count_idx]);
+    let list_chunk = chunks[list_idx];
+
+    // Render Subtitle if present and show_input is false
+    if let Some(ref sub) = state.plugin_modal_subtitle {
+        if let Some(sub_chunk) = subtitle_chunk {
+            let sub_para = Paragraph::new(Line::from(vec![
+                Span::styled("   📂 ", Style::default().fg(Color::Cyan)),
+                Span::styled(sub.clone(), Style::default().fg(Color::DarkGray)),
+            ]));
+            f.render_widget(sub_para, sub_chunk);
+        }
+    }
+
+    // Render Tabs if present
+    if !state.plugin_modal_tabs.is_empty() {
+        if let Some(t_idx) = tabs_idx {
+            let tab_titles: Vec<Line> = state
+                .plugin_modal_tabs
+                .iter()
+                .enumerate()
+                .map(|(i, tab)| {
+                    if i == state.plugin_modal_active_tab_index {
+                        Line::from(vec![
+                            Span::styled(" [", Style::default().fg(Color::DarkGray)),
+                            Span::styled(tab.clone(), Style::default().fg(Color::Cyan).bold()),
+                            Span::styled("] ", Style::default().fg(Color::DarkGray)),
+                        ])
+                    } else {
+                        Line::from(vec![
+                            Span::styled("  ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(tab.clone(), Style::default().fg(Color::DarkGray)),
+                            Span::styled("  ", Style::default().fg(Color::DarkGray)),
+                        ])
+                    }
+                })
+                .collect();
+
+            let tabs_widget = ratatui::widgets::Tabs::new(tab_titles)
+                .divider(Span::styled("│", Style::default().fg(Color::DarkGray)))
+                .select(state.plugin_modal_active_tab_index)
+                .highlight_style(Style::default().fg(Color::Cyan).bold());
+
+            f.render_widget(tabs_widget, chunks[t_idx]);
+        }
+    }
+
     // Prompt input
-    let input_border_style = if state.plugin_modal_focused {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
+    if let Some(inp_chunk) = input_chunk {
+        let input_border_style = if state.plugin_modal_focused {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
 
-    let home = std::env::var("HOME").unwrap_or_default();
-    let display_path = if !home.is_empty() && state.current_path.starts_with(&home) {
-        format!(
-            "~/{}",
-            state
-                .current_path
-                .strip_prefix(&home)
-                .unwrap_or(&state.current_path)
-                .to_string_lossy()
-        )
-    } else {
-        state.current_path.to_string_lossy().to_string()
-    };
-    let display_path = if display_path.ends_with('/') || display_path == "~" {
-        display_path
-    } else {
-        format!("{}/", display_path)
-    };
+        let home = std::env::var("HOME").unwrap_or_default();
+        let display_path = if !home.is_empty() && state.current_path.starts_with(&home) {
+            format!(
+                "~/{}",
+                state
+                    .current_path
+                    .strip_prefix(&home)
+                    .unwrap_or(&state.current_path)
+                    .to_string_lossy()
+            )
+        } else {
+            state.current_path.to_string_lossy().to_string()
+        };
+        let display_path = if display_path.ends_with('/') || display_path == "~" {
+            display_path
+        } else {
+            format!("{}/", display_path)
+        };
 
-    let search_title = format!(" 󰍉 {} ", display_path);
+        let search_title = format!(" 󰍉 {} ", display_path);
 
-    let input_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(input_border_style)
-        .title(search_title);
-    let input_para = Paragraph::new(state.plugin_modal_input.as_str())
-        .block(input_block)
-        .style(Style::default().fg(Color::White));
-    f.render_widget(input_para, chunks[0]);
+        let input_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(input_border_style)
+            .title(search_title);
+        let input_para = Paragraph::new(state.plugin_modal_input.as_str())
+            .block(input_block)
+            .style(Style::default().fg(Color::White));
+        f.render_widget(input_para, inp_chunk);
 
-    // Cursor for input
-    if state.plugin_modal_focused {
-        f.set_cursor(
-            chunks[0].x + 1 + state.plugin_modal_cursor_index as u16,
-            chunks[0].y + 1,
-        );
+        // Cursor for input
+        if state.plugin_modal_focused {
+            f.set_cursor(
+                inp_chunk.x + 1 + state.plugin_modal_cursor_index as u16,
+                inp_chunk.y + 1,
+            );
+        }
     }
 
     // Results file count label
@@ -2526,11 +2657,13 @@ fn render_plugin_overlay(f: &mut Frame, state: &AppState) {
         Span::styled(" items", Style::default().fg(Color::DarkGray)),
     ]);
     let count_para = Paragraph::new(count_line);
-    f.render_widget(count_para, chunks[1]);
+    if let Some(cnt_chunk) = count_chunk {
+        f.render_widget(count_para, cnt_chunk);
+    }
 
     // Results list
     let total_results = state.plugin_modal_filtered_items.len();
-    let list_height = chunks[2].height as usize;
+    let list_height = list_chunk.height as usize;
 
     let start_idx = if total_results <= list_height {
         0
@@ -2569,7 +2702,9 @@ fn render_plugin_overlay(f: &mut Frame, state: &AppState) {
             let file_style = get_icon_style(path, &entry_type);
             let file_color = file_style.fg.unwrap_or(Color::White);
 
-            let display_icon = if let Some(ic) = icon {
+            let display_icon = if let Some(ref ic) = result.icon {
+                ic.as_str()
+            } else if let Some(ic) = icon {
                 ic
             } else if result.value == ".." {
                 "󱏒"
@@ -2608,7 +2743,7 @@ fn render_plugin_overlay(f: &mut Frame, state: &AppState) {
     let list = List::new(list_items)
         .block(Block::default().borders(Borders::NONE))
         .highlight_style(Style::default());
-    f.render_widget(list, chunks[2]);
+    f.render_widget(list, list_chunk);
 
     // Render Preview Pane if present
     if let Some((path, lines, area)) = right_area {

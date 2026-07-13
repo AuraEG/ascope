@@ -32,6 +32,8 @@ pub enum SortMode {
 pub struct PluginOverlayItem {
     pub label: String,
     pub value: String,
+    pub tab: Option<String>,
+    pub icon: Option<String>,
 }
 
 pub struct ShellResult {
@@ -170,6 +172,16 @@ pub struct AppState {
     /// Selected index inside the help modal
     pub help_selected_index: usize,
     pub plugin_engine: Option<crate::plugin::engine::PluginEngine>,
+    pub plugin_modal_show_input: bool,
+    pub plugin_modal_subtitle: Option<String>,
+    pub plugin_modal_width: u16,
+    pub plugin_modal_height: u16,
+    pub plugin_modal_fixed: bool,
+    pub plugin_modal_tabs: Vec<String>,
+    pub plugin_modal_active_tab_index: usize,
+    /// Registered status widgets/information from plugins to be displayed in the right dashboard pane
+    pub dashboard_infos:
+        std::sync::Mutex<std::collections::BTreeMap<String, (String, Vec<String>)>>,
     pub last_selection_time: std::time::Instant,
     pub search_overlay_mode: SearchOverlayMode,
     pub search_overlay_input: String,
@@ -607,6 +619,14 @@ impl AppState {
             show_help: false,
             help_selected_index: 0,
             plugin_engine: None,
+            plugin_modal_show_input: true,
+            plugin_modal_subtitle: None,
+            plugin_modal_width: 95,
+            plugin_modal_height: 90,
+            plugin_modal_fixed: false,
+            plugin_modal_tabs: Vec::new(),
+            plugin_modal_active_tab_index: 0,
+            dashboard_infos: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             last_selection_time: std::time::Instant::now(),
             search_overlay_mode: SearchOverlayMode::FuzzyFiles,
             search_overlay_input: String::new(),
@@ -1885,17 +1905,36 @@ impl AppState {
     }
 
     pub fn update_plugin_modal_filtering(&mut self) {
-        let query = self.plugin_modal_input.to_lowercase();
-        if query.is_empty() {
-            self.plugin_modal_filtered_items = self.plugin_modal_items.clone();
-        } else {
-            self.plugin_modal_filtered_items = self
-                .plugin_modal_items
-                .iter()
-                .filter(|item| item.label.to_lowercase().contains(&query))
+        let active_tab = if !self.plugin_modal_tabs.is_empty() {
+            self.plugin_modal_tabs
+                .get(self.plugin_modal_active_tab_index)
                 .cloned()
-                .collect();
-        }
+        } else {
+            None
+        };
+
+        let query = self.plugin_modal_input.to_lowercase();
+        self.plugin_modal_filtered_items = self
+            .plugin_modal_items
+            .iter()
+            .filter(|item| {
+                if let Some(ref tab_name) = active_tab {
+                    if let Some(ref item_tab) = item.tab {
+                        if item_tab != tab_name {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+                if query.is_empty() {
+                    true
+                } else {
+                    item.label.to_lowercase().contains(&query)
+                }
+            })
+            .cloned()
+            .collect();
         self.plugin_modal_selected_index = 0;
         self.update_plugin_modal_preview();
     }
