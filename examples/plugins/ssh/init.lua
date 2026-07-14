@@ -5,6 +5,8 @@ if ascope.config and ascope.config["ssh"] and ascope.config["ssh"].key_binding t
     key = ascope.config["ssh"].key_binding
 end
 
+local active_mounts = {}
+
 local function parse_ssh_config()
     local home = os.getenv("HOME")
     local config_path = home .. "/.ssh/config"
@@ -114,7 +116,24 @@ ascope.register_key(key, function()
                             end
                         end)
                     elseif act_item.value == "mount" then
-                        ascope.notify("Mounting not implemented yet", "info")
+                        local mount_path = "/tmp/ascope-ssh-" .. item.value
+                        ascope.exec_shell("mkdir", {"-p", mount_path}, function(stdout, stderr, exit_code)
+                            if exit_code ~= 0 then
+                                ascope.notify("Failed to create mount directory: " .. tostring(stderr), "error")
+                                return
+                            end
+                            
+                            ascope.notify("Mounting " .. item.value .. " to " .. mount_path .. "...", "info")
+                            ascope.exec_shell("sshfs", {item.value .. ":/", mount_path}, function(m_stdout, m_stderr, m_exit_code)
+                                if m_exit_code == 0 then
+                                    active_mounts[item.value] = mount_path
+                                    ascope.notify("Successfully mounted remote filesystem ✓", "info")
+                                    ascope.navigate(mount_path)
+                                else
+                                    ascope.notify("Failed to mount remote: " .. tostring(m_stderr), "error")
+                                end
+                            end)
+                        end)
                     end
                 end
             })
