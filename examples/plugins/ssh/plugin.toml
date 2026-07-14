@@ -1,0 +1,7 @@
+name = "ssh"
+version = "0.1.0"
+author = "Ahmed Ashour"
+main = "init.lua"
+
+[config]
+key_binding = "alt-s"

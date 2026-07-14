@@ -942,3 +942,54 @@ fn test_fzf_plugin_integration() {
     );
     ascope::plugin::engine::clear_current_app_state();
 }
+
+#[test]
+fn test_ssh_plugin_integration() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let config_dir = root.join(".config/ascope/plugins");
+    let dest_plugin = config_dir.join("ssh");
+    fs::create_dir_all(&dest_plugin).unwrap();
+
+    fs::copy(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/plugins/ssh/plugin.toml"),
+        dest_plugin.join("plugin.toml"),
+    )
+    .unwrap();
+    fs::copy(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/plugins/ssh/init.lua"),
+        dest_plugin.join("init.lua"),
+    )
+    .unwrap();
+
+    let mut state = ascope::app::AppState::new(root.clone());
+    let mut engine = PluginEngine::new(config_dir).unwrap();
+    ascope::plugin::engine::set_current_app_state(&mut state as *mut ascope::app::AppState);
+    engine.load_plugins().unwrap();
+    state.plugin_engine = Some(engine);
+
+    assert_eq!(state.plugin_engine.as_ref().unwrap().keybindings.len(), 0);
+    assert_eq!(
+        state
+            .plugin_engine
+            .as_ref()
+            .unwrap()
+            .dynamic_keybindings
+            .borrow()
+            .len(),
+        1
+    );
+    assert_eq!(
+        state
+            .plugin_engine
+            .as_ref()
+            .unwrap()
+            .dynamic_keybindings
+            .borrow()[0]
+            .key,
+        "alt-s"
+    );
+    ascope::plugin::engine::clear_current_app_state();
+}
