@@ -7,6 +7,37 @@ end
 
 local active_mounts = {}
 
+local function update_ssh_dashboard()
+    local list = {}
+    local count = 0
+    for host, path in pairs(active_mounts) do
+        table.insert(list, host .. " ➔ " .. path)
+        count = count + 1
+    end
+    if count > 0 then
+        ascope.set_dashboard_info("ssh", "🌐 Active SSH Mounts", list)
+    else
+        ascope.remove_dashboard_info("ssh")
+    end
+end
+
+local function unmount_host(host, path, cb)
+    ascope.exec_shell("fusermount", {"-u", path}, function(stdout, stderr, exit_code)
+        if exit_code == 0 then
+            cb(true)
+        else
+            -- Try umount as a fallback
+            ascope.exec_shell("umount", {path}, function(u_stdout, u_stderr, u_exit)
+                if u_exit == 0 then
+                    cb(true)
+                else
+                    cb(false, u_stderr)
+                end
+            end)
+        end
+    end)
+end
+
 local function parse_ssh_config()
     local home = os.getenv("HOME")
     local config_path = home .. "/.ssh/config"
@@ -91,16 +122,23 @@ ascope.register_key(key, function()
         height = 14,
         items = items,
         on_select = function(item)
+            local is_mounted = (active_mounts[item.value] ~= nil)
+            local menu_items = {
+                { label = "🐚 Open Remote Shell in Tmux", value = "shell", icon = "🐚" }
+            }
+            if is_mounted then
+                table.insert(menu_items, 1, { label = "📤 Unmount Remote Filesystem", value = "unmount", icon = "📤" })
+            else
+                table.insert(menu_items, 1, { label = "📁 Mount Remote via SSHFS", value = "mount", icon = "📁" })
+            end
+
             ascope.open_modal({
                 title = "⚡ SSH Action: " .. item.value,
                 subtitle = "Select Connection Mode",
                 fixed = true,
                 width = 80,
                 height = 12,
-                items = {
-                    { label = "📁 Mount Remote via SSHFS", value = "mount", icon = "📁" },
-                    { label = "🐚 Open Remote Shell in Tmux", value = "shell", icon = "🐚" },
-                },
+                items = menu_items,
                 on_select = function(act_item)
                     if act_item.value == "shell" then
                         local tmux_env = os.getenv("TMUX")
@@ -127,6 +165,7 @@ ascope.register_key(key, function()
                             ascope.exec_shell("sshfs", {item.value .. ":/", mount_path}, function(m_stdout, m_stderr, m_exit_code)
                                 if m_exit_code == 0 then
                                     active_mounts[item.value] = mount_path
+                                    update_ssh_dashboard()
                                     ascope.notify("Successfully mounted remote filesystem ✓", "info")
                                     ascope.navigate(mount_path)
                                 else
@@ -134,6 +173,26 @@ ascope.register_key(key, function()
                                 end
                             end)
                         end)
+                    elseif act_item.value == "unmount" then
+                        local path = active_mounts[item.value]
+                        if path then
+                            ascope.notify("Unmounting " .. item.value .. "...", "info")
+                            unmount_host(item.value, path, function(success, err)
+                                if success then
+                                    active_mounts[item.value] = nil
+                                    update_ssh_dashboard()
+                                    ascope.notify("Successfully unmounted " .. item.value, "info")
+                                    
+                                    -- Navigate away if currently browsing the mounted folder
+                                    local cwd = ascope.get_cwd()
+                                    if cwd:find(path, 1, true) then
+                                        ascope.navigate(os.getenv("HOME"))
+                                    end
+                                else
+                                    ascope.notify("Unmount failed: " .. tostring(err), "error")
+                                end
+                            end)
+                        end
                     end
                 end
             })
