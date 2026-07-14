@@ -89,7 +89,35 @@ ascope.register_key(key, function()
         height = 14,
         items = items,
         on_select = function(item)
-            ascope.notify("Selected host: " .. item.value, "info")
+            ascope.open_modal({
+                title = "⚡ SSH Action: " .. item.value,
+                subtitle = "Select Connection Mode",
+                fixed = true,
+                width = 80,
+                height = 12,
+                items = {
+                    { label = "📁 Mount Remote via SSHFS", value = "mount", icon = "📁" },
+                    { label = "🐚 Open Remote Shell in Tmux", value = "shell", icon = "🐚" },
+                },
+                on_select = function(act_item)
+                    if act_item.value == "shell" then
+                        local tmux_env = os.getenv("TMUX")
+                        if not tmux_env or tmux_env == "" then
+                            ascope.notify("Tmux environment not detected to open shell", "warn")
+                            return
+                        end
+                        ascope.exec_shell("tmux", {"new-window", "-n", "ssh:" .. item.value, "ssh " .. item.value}, function(stdout, stderr, exit_code)
+                            if exit_code == 0 then
+                                ascope.notify("Opened remote SSH shell in tmux window", "info")
+                            else
+                                ascope.notify("Failed to open remote shell: " .. tostring(stderr), "error")
+                            end
+                        end)
+                    elseif act_item.value == "mount" then
+                        ascope.notify("Mounting not implemented yet", "info")
+                    end
+                end
+            })
         end
     })
 end, "Open SSH Host Picker")
