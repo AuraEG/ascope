@@ -174,6 +174,7 @@ pub struct AppState {
     pub plugin_engine: Option<crate::plugin::engine::PluginEngine>,
     pub plugin_modal_show_input: bool,
     pub plugin_modal_subtitle: Option<String>,
+    pub plugin_modal_input_title: Option<String>,
     pub plugin_modal_width: u16,
     pub plugin_modal_height: u16,
     pub plugin_modal_fixed: bool,
@@ -621,6 +622,7 @@ impl AppState {
             plugin_engine: None,
             plugin_modal_show_input: true,
             plugin_modal_subtitle: None,
+            plugin_modal_input_title: None,
             plugin_modal_width: 95,
             plugin_modal_height: 90,
             plugin_modal_fixed: false,
@@ -1930,7 +1932,7 @@ impl AppState {
                 if query.is_empty() {
                     true
                 } else {
-                    item.label.to_lowercase().contains(&query)
+                    item.label.to_lowercase().contains(&query) || item.value.starts_with("submit_")
                 }
             })
             .cloned()

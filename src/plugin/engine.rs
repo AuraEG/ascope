@@ -377,6 +377,7 @@ impl PluginEngine {
                 .flatten()
                 .unwrap_or(true);
             let subtitle: Option<String> = opts.get("subtitle").ok();
+            let input_title: Option<String> = opts.get("input_title").ok();
             let width: u16 = opts.get("width").unwrap_or(95);
             let height: u16 = opts.get("height").unwrap_or(90);
             let fixed: bool = opts.get("fixed").unwrap_or(false);
@@ -391,6 +392,7 @@ impl PluginEngine {
                 state.plugin_modal_focused = true;
                 state.plugin_modal_show_input = show_input;
                 state.plugin_modal_subtitle = subtitle;
+                state.plugin_modal_input_title = input_title;
                 state.plugin_modal_width = width;
                 state.plugin_modal_height = height;
                 state.plugin_modal_fixed = fixed;
@@ -538,6 +540,46 @@ impl PluginEngine {
             })?;
         ascope_api.set("exec_shell", exec_shell_fn)?;
 
+        let exec_interactive_fn = lua.create_function(|_, (cmd, args): (String, Table)| {
+            let mut rust_args = Vec::new();
+            let len = args.len()?;
+            for i in 1..=len {
+                let val: String = args.get(i)?;
+                rust_args.push(val);
+            }
+
+            use crossterm::cursor::{Hide, Show};
+            use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+            use crossterm::execute;
+            use crossterm::terminal::{
+                disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+            };
+            use std::io::stdout;
+
+            let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture, Show);
+            let _ = disable_raw_mode();
+
+            let child = std::process::Command::new(cmd).args(&rust_args).spawn();
+            if let Ok(mut c) = child {
+                let _ = c.wait();
+            }
+
+            let _ = enable_raw_mode();
+            let _ = execute!(stdout(), EnterAlternateScreen, EnableMouseCapture, Hide);
+
+            // Discard any pending input events queued during the interactive command
+            while crossterm::event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
+                let _ = crossterm::event::read();
+            }
+
+            with_app_state_mut(|state| {
+                state.needs_terminal_clear = true;
+            });
+
+            Ok(())
+        })?;
+        ascope_api.set("exec_interactive", exec_interactive_fn)?;
+
         let register_key_fn = lua.create_function(
             |lua, (binding, cb, description): (String, Function, Option<String>)| {
                 let key = lua.create_registry_value(cb)?;
@@ -678,6 +720,9 @@ impl PluginEngine {
             let func: Function = self.lua.registry_value(&key)?;
             let tbl = self.lua.create_table()?;
             tbl.set("value", value)?;
+            let input_val =
+                with_app_state_mut(|state| state.plugin_modal_input.clone()).unwrap_or_default();
+            tbl.set("input", input_val)?;
             let _res: Value = func.call::<_, Value>((tbl, mode))?;
             self.lua.remove_registry_value(key)?;
         }

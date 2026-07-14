@@ -2622,7 +2622,11 @@ fn render_plugin_overlay(f: &mut Frame, state: &AppState) {
             format!("{}/", display_path)
         };
 
-        let search_title = format!(" 󰍉 {} ", display_path);
+        let search_title = if let Some(ref title) = state.plugin_modal_input_title {
+            format!(" 󰍉 {} ", title)
+        } else {
+            format!(" 󰍉 {} ", display_path)
+        };
 
         let input_block = Block::default()
             .borders(Borders::ALL)

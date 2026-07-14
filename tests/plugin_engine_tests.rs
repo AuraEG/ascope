@@ -958,8 +958,7 @@ fn test_ssh_plugin_integration() {
     )
     .unwrap();
     fs::copy(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("examples/plugins/ssh/init.lua"),
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/ssh/init.lua"),
         dest_plugin.join("init.lua"),
     )
     .unwrap();
