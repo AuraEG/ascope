@@ -504,11 +504,15 @@ impl PluginEngine {
                 let key = lua.create_registry_value(cb)?;
 
                 let tx_opt = with_app_state(|state| state.shell_result_tx.clone());
+                let cwd_opt = with_app_state(|state| state.current_path.clone());
 
                 if let Some(tx) = tx_opt {
                     std::thread::spawn(move || {
                         let mut command = std::process::Command::new(&cmd);
                         command.args(&args_vec);
+                        if let Some(ref cwd) = cwd_opt {
+                            command.current_dir(cwd);
+                        }
                         command.stdout(std::process::Stdio::piped());
                         command.stderr(std::process::Stdio::piped());
 
@@ -559,7 +563,14 @@ impl PluginEngine {
             let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture, Show);
             let _ = disable_raw_mode();
 
-            let child = std::process::Command::new(cmd).args(&rust_args).spawn();
+            let cwd_opt = with_app_state(|state| state.current_path.clone());
+
+            let mut command = std::process::Command::new(cmd);
+            command.args(&rust_args);
+            if let Some(ref cwd) = cwd_opt {
+                command.current_dir(cwd);
+            }
+            let child = command.spawn();
             if let Ok(mut c) = child {
                 let _ = c.wait();
             }
