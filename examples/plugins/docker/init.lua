@@ -215,6 +215,38 @@ local function handle_docker_selection(item)
         })
 
     elseif item.tab == "Images" then
+        if item.value == "pull_new" then
+            ascope.open_modal({
+                title = "⬇ Pull Image",
+                subtitle = "Enter image name (e.g. ubuntu:latest)",
+                show_input = true,
+                fixed = true,
+                width = 60,
+                height = 10,
+                items = {
+                    { label = "[Submit] Pull Image", value = "submit" }
+                },
+                on_select = function(act_item)
+                    local image_to_pull = act_item.input
+                    if not image_to_pull or image_to_pull == "" then
+                        ascope.notify("No image name entered", "warn")
+                        return
+                    end
+                    ascope.notify("Pulling image '" .. image_to_pull .. "' in background...", "info")
+                    ascope.exec_shell("docker", {"pull", image_to_pull}, function(stdout, stderr, exit_code)
+                        if exit_code == 0 then
+                            ascope.notify("Successfully pulled " .. image_to_pull .. " ✓", "info")
+                        else
+                            ascope.notify("Failed to pull image: " .. tostring(stderr), "error")
+                        end
+                    end)
+                end
+            })
+            return
+        end
+
+        -- Docker Image Picker
+        -- Presents options to run, inspect, or delete selected local images
         local img_id = item.value
         local img_name = item.label:match("📦%s*(%S+)") or img_id
 
@@ -329,8 +361,8 @@ ascope.register_key(key, function()
             if #containers == 0 then
                 table.insert(containers, { label = "🔴 No containers found", value = "none", tab = "Containers" })
             end
-            if #images == 0 then
-                table.insert(images, { label = "📦 No images found", value = "none", tab = "Images" })
+            if #images == 1 then
+                table.insert(images, { label = "📦 No local images found", value = "none", tab = "Images" })
             end
             if #volumes == 0 then
                 table.insert(volumes, { label = "💾 No volumes found", value = "none", tab = "Volumes" })
@@ -379,6 +411,11 @@ ascope.register_key(key, function()
 
     -- 2. Fetch Images
     ascope.exec_shell("docker", {"images", "--format", "{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.Size}}"}, function(stdout, stderr, exit_code)
+        table.insert(images, {
+            label = "⬇  Pull New Image...",
+            value = "pull_new",
+            tab = "Images"
+        })
         if exit_code == 0 then
             for line in stdout:gmatch("[^\r\n]+") do
                 local repo_tag, id, size = line:match("^([^\t]+)\t(%S+)\t(%S+)$")
