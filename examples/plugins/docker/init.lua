@@ -22,11 +22,11 @@ end)
 local function check_compose_status()
     local cwd = ascope.get_cwd()
     if not cwd then return end
-    
+
     local f1 = io.open(cwd .. "/docker-compose.yml", "r")
     local f2 = io.open(cwd .. "/docker-compose.yaml", "r")
     local compose_file = nil
-    
+
     if f1 then
         compose_file = "docker-compose.yml"
         f1:close()
@@ -68,16 +68,17 @@ ascope.on("on_enter", check_compose_status)
 ascope.on("on_startup", check_compose_status)
 
 -- Container extraction browser helper
+-- Copies container filesystem to temporary location to inspect using ascope's TUI explorer
 local function browse_container(id, name)
     local mount_path = "/tmp/ascope-docker-" .. id
     ascope.notify("Extracting container filesystem to " .. mount_path .. "...", "info")
-    
+
     ascope.exec_shell("mkdir", {"-p", mount_path}, function(stdout, stderr, exit_code)
         if exit_code ~= 0 then
             ascope.notify("Failed to create temp directory", "error")
             return
         end
-        
+
         -- Copy container root filesystem in background
         ascope.exec_shell("docker", {"cp", id .. ":/", mount_path}, function(cp_stdout, cp_stderr, cp_exit_code)
             if cp_exit_code == 0 then
@@ -94,13 +95,13 @@ end
 local function browse_volume(volume_name)
     local temp_path = "/tmp/ascope-vol-" .. volume_name
     ascope.notify("Extracting volume data to " .. temp_path .. "...", "info")
-    
+
     ascope.exec_shell("mkdir", {"-p", temp_path}, function(stdout, stderr, exit_code)
         if exit_code ~= 0 then
             ascope.notify("Failed to create temp directory", "error")
             return
         end
-        
+
         -- Run temporary helper alpine container to copy volume contents into /tmp
         ascope.exec_shell("docker", {
             "run", "--rm",
@@ -363,7 +364,7 @@ ascope.register_key(key, function()
                     local is_running = status:find("Up") ~= nil
                     local indicator = is_running and "🟢" or "🔴"
                     if ports == "" then ports = "none" end
-                    
+
                     local label = string.format("%s  %-20s  %-30s  %-15s  %s", indicator, name, img, status, ports)
                     table.insert(containers, {
                         label = label,
