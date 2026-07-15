@@ -120,7 +120,7 @@ end
 
 -- Handle selection callback from the main picker modal
 local function handle_docker_selection(item)
-    if item.value == "loading" then return end
+    if item.value == "loading" or item.value == "none" then return end
 
     if item.tab == "Containers" then
         local id = item.value
@@ -325,6 +325,16 @@ ascope.register_key(key, function()
     local function check_done()
         completed = completed + 1
         if completed == 3 then
+            if #containers == 0 then
+                table.insert(containers, { label = "🔴 No containers found", value = "none", tab = "Containers" })
+            end
+            if #images == 0 then
+                table.insert(images, { label = "📦 No images found", value = "none", tab = "Images" })
+            end
+            if #volumes == 0 then
+                table.insert(volumes, { label = "💾 No volumes found", value = "none", tab = "Volumes" })
+            end
+
             local items = {}
             for _, c in ipairs(containers) do table.insert(items, c) end
             for _, img in ipairs(images) do table.insert(items, img) end
