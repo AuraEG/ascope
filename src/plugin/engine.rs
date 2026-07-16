@@ -348,27 +348,74 @@ impl PluginEngine {
                 let item_tbl: Table = items_table.get(i)?;
                 let label: String = item_tbl.get("label")?;
                 let value: String = item_tbl.get("value")?;
-                items.push(crate::app::PluginOverlayItem { label, value });
+                let tab: Option<String> = item_tbl.get("tab").ok();
+                let icon: Option<String> = item_tbl.get("icon").ok();
+                items.push(crate::app::PluginOverlayItem {
+                    label,
+                    value,
+                    tab,
+                    icon,
+                });
             }
 
-            let on_select: Function = opts.get("on_select")?;
-            let key = lua.create_registry_value(on_select)?;
+            let tabs_table: Option<Table> = opts.get("tabs").ok();
+            let mut tabs = Vec::new();
+            if let Some(tbl) = tabs_table {
+                let t_len = tbl.len()?;
+                for i in 1..=t_len {
+                    let val: String = tbl.get(i)?;
+                    tabs.push(val);
+                }
+            }
+
+            let on_select: Option<Function> = opts.get("on_select").ok();
+            let key_opt = if let Some(cb) = on_select {
+                Some(lua.create_registry_value(cb)?)
+            } else {
+                None
+            };
+
+            let show_input: bool = opts
+                .get::<_, Option<bool>>("show_input")
+                .ok()
+                .flatten()
+                .unwrap_or(true);
+            let subtitle: Option<String> = opts.get("subtitle").ok();
+            let input_title: Option<String> = opts.get("input_title").ok();
+            let width: u16 = opts.get("width").unwrap_or(95);
+            let height: u16 = opts.get("height").unwrap_or(90);
+            let fixed: bool = opts.get("fixed").unwrap_or(false);
+
+            let active_tab_str: Option<String> = opts.get("active_tab").ok();
+            let mut active_tab_idx = 0;
+            if let Some(ref target_tab) = active_tab_str {
+                if let Some(pos) = tabs.iter().position(|t| t == target_tab) {
+                    active_tab_idx = pos;
+                }
+            }
 
             with_app_state_mut(|state| {
                 state.modal_mode = crate::app::ModalMode::PluginOverlay;
                 state.plugin_modal_title = title;
-                state.plugin_modal_items = items.clone();
-                state.plugin_modal_filtered_items = items;
+                state.plugin_modal_items = items;
                 state.plugin_modal_input.clear();
                 state.plugin_modal_selected_index = 0;
                 state.plugin_modal_cursor_index = 0;
                 state.plugin_modal_focused = true;
-                state.update_plugin_modal_preview();
+                state.plugin_modal_show_input = show_input;
+                state.plugin_modal_subtitle = subtitle;
+                state.plugin_modal_input_title = input_title;
+                state.plugin_modal_width = width;
+                state.plugin_modal_height = height;
+                state.plugin_modal_fixed = fixed;
+                state.plugin_modal_tabs = tabs;
+                state.plugin_modal_active_tab_index = active_tab_idx;
+                state.update_plugin_modal_filtering();
             });
 
             with_app_state_mut(|state| {
                 if let Some(ref mut engine) = state.plugin_engine {
-                    *engine.active_modal_callback.borrow_mut() = Some(key);
+                    *engine.active_modal_callback.borrow_mut() = key_opt;
                 }
             });
 
@@ -469,11 +516,15 @@ impl PluginEngine {
                 let key = lua.create_registry_value(cb)?;
 
                 let tx_opt = with_app_state(|state| state.shell_result_tx.clone());
+                let cwd_opt = with_app_state(|state| state.current_path.clone());
 
                 if let Some(tx) = tx_opt {
                     std::thread::spawn(move || {
                         let mut command = std::process::Command::new(&cmd);
                         command.args(&args_vec);
+                        if let Some(ref cwd) = cwd_opt {
+                            command.current_dir(cwd);
+                        }
                         command.stdout(std::process::Stdio::piped());
                         command.stderr(std::process::Stdio::piped());
 
@@ -505,6 +556,53 @@ impl PluginEngine {
             })?;
         ascope_api.set("exec_shell", exec_shell_fn)?;
 
+        let exec_interactive_fn = lua.create_function(|_, (cmd, args): (String, Table)| {
+            let mut rust_args = Vec::new();
+            let len = args.len()?;
+            for i in 1..=len {
+                let val: String = args.get(i)?;
+                rust_args.push(val);
+            }
+
+            use crossterm::cursor::{Hide, Show};
+            use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+            use crossterm::execute;
+            use crossterm::terminal::{
+                disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+            };
+            use std::io::stdout;
+
+            let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture, Show);
+            let _ = disable_raw_mode();
+
+            let cwd_opt = with_app_state(|state| state.current_path.clone());
+
+            let mut command = std::process::Command::new(cmd);
+            command.args(&rust_args);
+            if let Some(ref cwd) = cwd_opt {
+                command.current_dir(cwd);
+            }
+            let child = command.spawn();
+            if let Ok(mut c) = child {
+                let _ = c.wait();
+            }
+
+            let _ = enable_raw_mode();
+            let _ = execute!(stdout(), EnterAlternateScreen, EnableMouseCapture, Hide);
+
+            // Discard any pending input events queued during the interactive command
+            while crossterm::event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
+                let _ = crossterm::event::read();
+            }
+
+            with_app_state_mut(|state| {
+                state.needs_terminal_clear = true;
+            });
+
+            Ok(())
+        })?;
+        ascope_api.set("exec_interactive", exec_interactive_fn)?;
+
         let register_key_fn = lua.create_function(
             |lua, (binding, cb, description): (String, Function, Option<String>)| {
                 let key = lua.create_registry_value(cb)?;
@@ -522,6 +620,27 @@ impl PluginEngine {
             },
         )?;
         ascope_api.set("register_key", register_key_fn)?;
+
+        let set_dashboard_info_fn =
+            lua.create_function(|_, (key, title, lines): (String, String, Vec<String>)| {
+                let _ = with_app_state_mut(|state| {
+                    if let Ok(mut map) = state.dashboard_infos.lock() {
+                        map.insert(key, (title, lines));
+                    }
+                });
+                Ok(())
+            })?;
+        ascope_api.set("set_dashboard_info", set_dashboard_info_fn)?;
+
+        let remove_dashboard_info_fn = lua.create_function(|_, key: String| {
+            let _ = with_app_state_mut(|state| {
+                if let Ok(mut map) = state.dashboard_infos.lock() {
+                    map.remove(&key);
+                }
+            });
+            Ok(())
+        })?;
+        ascope_api.set("remove_dashboard_info", remove_dashboard_info_fn)?;
 
         let config_tbl = lua.create_table()?;
         ascope_api.set("config", config_tbl)?;
@@ -618,12 +737,22 @@ impl PluginEngine {
         Ok(results)
     }
 
-    pub fn trigger_modal_select(&self, value: String, mode: String) -> Result<(), mlua::Error> {
+    pub fn trigger_modal_select(
+        &self,
+        item: crate::app::PluginOverlayItem,
+        mode: String,
+    ) -> Result<(), mlua::Error> {
         let key_opt = self.active_modal_callback.borrow_mut().take();
         if let Some(key) = key_opt {
             let func: Function = self.lua.registry_value(&key)?;
             let tbl = self.lua.create_table()?;
-            tbl.set("value", value)?;
+            tbl.set("value", item.value)?;
+            tbl.set("label", item.label)?;
+            tbl.set("tab", item.tab)?;
+            tbl.set("icon", item.icon)?;
+            let input_val =
+                with_app_state_mut(|state| state.plugin_modal_input.clone()).unwrap_or_default();
+            tbl.set("input", input_val)?;
             let _res: Value = func.call::<_, Value>((tbl, mode))?;
             self.lua.remove_registry_value(key)?;
         }

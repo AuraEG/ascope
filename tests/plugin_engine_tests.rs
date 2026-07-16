@@ -339,7 +339,15 @@ fn test_plugin_modal_overlay() {
     // Trigger selection callback simulation
     let engine_ref = state.plugin_engine.as_ref().unwrap();
     engine_ref
-        .trigger_modal_select("val2".to_string(), "select".to_string())
+        .trigger_modal_select(
+            ascope::app::PluginOverlayItem {
+                label: "Item 2".to_string(),
+                value: "val2".to_string(),
+                tab: None,
+                icon: None,
+            },
+            "select".to_string(),
+        )
         .unwrap();
 
     // Check that the callback triggered notification in AppState
@@ -939,6 +947,107 @@ fn test_fzf_plugin_integration() {
             .borrow()[0]
             .key,
         "shift-f"
+    );
+    ascope::plugin::engine::clear_current_app_state();
+}
+
+#[test]
+fn test_ssh_plugin_integration() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let config_dir = root.join(".config/ascope/plugins");
+    let dest_plugin = config_dir.join("ssh");
+    fs::create_dir_all(&dest_plugin).unwrap();
+
+    fs::copy(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/plugins/ssh/plugin.toml"),
+        dest_plugin.join("plugin.toml"),
+    )
+    .unwrap();
+    fs::copy(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/ssh/init.lua"),
+        dest_plugin.join("init.lua"),
+    )
+    .unwrap();
+
+    let mut state = ascope::app::AppState::new(root.clone());
+    let mut engine = PluginEngine::new(config_dir).unwrap();
+    ascope::plugin::engine::set_current_app_state(&mut state as *mut ascope::app::AppState);
+    engine.load_plugins().unwrap();
+    state.plugin_engine = Some(engine);
+
+    assert_eq!(state.plugin_engine.as_ref().unwrap().keybindings.len(), 0);
+    assert_eq!(
+        state
+            .plugin_engine
+            .as_ref()
+            .unwrap()
+            .dynamic_keybindings
+            .borrow()
+            .len(),
+        1
+    );
+    assert_eq!(
+        state
+            .plugin_engine
+            .as_ref()
+            .unwrap()
+            .dynamic_keybindings
+            .borrow()[0]
+            .key,
+        "alt-s"
+    );
+    ascope::plugin::engine::clear_current_app_state();
+}
+
+#[test]
+fn test_docker_plugin_integration() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let config_dir = root.join(".config/ascope/plugins");
+    let dest_plugin = config_dir.join("docker");
+    fs::create_dir_all(&dest_plugin).unwrap();
+
+    fs::copy(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/plugins/docker/plugin.toml"),
+        dest_plugin.join("plugin.toml"),
+    )
+    .unwrap();
+    fs::copy(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/plugins/docker/init.lua"),
+        dest_plugin.join("init.lua"),
+    )
+    .unwrap();
+
+    let mut state = ascope::app::AppState::new(root.clone());
+    let mut engine = PluginEngine::new(config_dir).unwrap();
+    ascope::plugin::engine::set_current_app_state(&mut state as *mut ascope::app::AppState);
+    engine.load_plugins().unwrap();
+    state.plugin_engine = Some(engine);
+
+    assert_eq!(state.plugin_engine.as_ref().unwrap().keybindings.len(), 0);
+    assert_eq!(
+        state
+            .plugin_engine
+            .as_ref()
+            .unwrap()
+            .dynamic_keybindings
+            .borrow()
+            .len(),
+        1
+    );
+    assert_eq!(
+        state
+            .plugin_engine
+            .as_ref()
+            .unwrap()
+            .dynamic_keybindings
+            .borrow()[0]
+            .key,
+        "alt-d"
     );
     ascope::plugin::engine::clear_current_app_state();
 }
