@@ -42,9 +42,9 @@ local function check_compose_status()
                 for line in stdout:gmatch("[^\r\n]+") do
                     local service, state = line:match("^(%S+)%s+(.+)$")
                     if service and state then
-                        local indicator = "○"
+                        local indicator = "🔴"
                         if state:find("running") or state:find("Up") then
-                            indicator = "●"
+                            indicator = "🟢"
                         end
                         table.insert(services, indicator .. " " .. service .. " (" .. state .. ")")
                     end
@@ -119,9 +119,110 @@ local function browse_volume(volume_name)
     end)
 end
 
+local last_active_tab = "Containers"
+local show_docker_explorer
+
 -- Handle selection callback from the main picker modal
-local function handle_docker_selection(item)
+local function handle_docker_selection(item, mode)
+    if mode == "cancel" then return end
     if item.value == "loading" or item.value == "none" then return end
+    if item.tab and item.tab ~= "" then
+        last_active_tab = item.tab
+    end
+
+    if mode == "delete" then
+        if item.tab == "Containers" then
+            local id = item.value
+            local name = item.label:match("🐳%s*(%S+)") or id
+            ascope.open_modal({
+                title = "❓ Confirm Remove",
+                subtitle = "Are you sure you want to remove container " .. name .. "?",
+                fixed = true,
+                width = 60,
+                height = 10,
+                items = {
+                    { label = "❌ Yes, Remove Container", value = "yes" },
+                    { label = "↩ Cancel", value = "cancel" }
+                },
+                on_select = function(conf_item, select_mode)
+                    if select_mode == "cancel" then
+                        show_docker_explorer("Containers")
+                        return
+                    end
+                    if conf_item.value == "yes" then
+                        ascope.notify("Removing container " .. name .. "...", "info")
+                        ascope.exec_shell("docker", {"rm", "-f", id}, function(stdout, stderr, exit)
+                            if exit == 0 then
+                                ascope.notify("Removed container ✓", "info")
+                            else
+                                ascope.notify("Failed to remove container: " .. tostring(stderr), "error")
+                            end
+                        end)
+                    end
+                end
+            })
+        elseif item.tab == "Images" then
+            local id = item.value
+            local name = item.label:match("📦%s*(%S+)") or id
+            ascope.open_modal({
+                title = "❓ Confirm Remove",
+                subtitle = "Are you sure you want to remove image " .. name .. "?",
+                fixed = true,
+                width = 60,
+                height = 10,
+                items = {
+                    { label = "❌ Yes, Remove Image", value = "yes" },
+                    { label = "↩ Cancel", value = "cancel" }
+                },
+                on_select = function(conf_item, select_mode)
+                    if select_mode == "cancel" then
+                        show_docker_explorer("Images")
+                        return
+                    end
+                    if conf_item.value == "yes" then
+                        ascope.notify("Removing image " .. name .. "...", "info")
+                        ascope.exec_shell("docker", {"rmi", id}, function(stdout, stderr, exit)
+                            if exit == 0 then
+                                ascope.notify("Removed image ✓", "info")
+                            else
+                                ascope.notify("Failed to remove image: " .. tostring(stderr), "error")
+                            end
+                        end)
+                    end
+                end
+            })
+        elseif item.tab == "Volumes" then
+            local id = item.value
+            ascope.open_modal({
+                title = "❓ Confirm Remove",
+                subtitle = "Are you sure you want to remove volume " .. id .. "?",
+                fixed = true,
+                width = 60,
+                height = 10,
+                items = {
+                    { label = "❌ Yes, Remove Volume", value = "yes" },
+                    { label = "↩ Cancel", value = "cancel" }
+                },
+                on_select = function(conf_item, select_mode)
+                    if select_mode == "cancel" then
+                        show_docker_explorer("Volumes")
+                        return
+                    end
+                    if conf_item.value == "yes" then
+                        ascope.notify("Removing volume " .. id .. "...", "info")
+                        ascope.exec_shell("docker", {"volume", "rm", id}, function(stdout, stderr, exit)
+                            if exit == 0 then
+                                ascope.notify("Removed volume ✓", "info")
+                            else
+                                ascope.notify("Failed to remove volume: " .. tostring(stderr), "error")
+                            end
+                        end)
+                    end
+                end
+            })
+        end
+        return
+    end
 
     if item.tab == "Containers" then
         local id = item.value
@@ -150,7 +251,11 @@ local function handle_docker_selection(item)
             width = 80,
             height = 14,
             items = con_actions,
-            on_select = function(act_item)
+            on_select = function(act_item, select_mode)
+                if select_mode == "cancel" then
+                    show_docker_explorer("Containers")
+                    return
+                end
                 if act_item.value == "foreground_shell" then
                     ascope.exec_interactive("docker", {"exec", "-it", id, "sh"})
                 elseif act_item.value == "tmux_shell" then
@@ -219,14 +324,19 @@ local function handle_docker_selection(item)
             ascope.open_modal({
                 title = "⬇ Pull Image",
                 subtitle = "Enter image name (e.g. ubuntu:latest)",
+                input_title = "Enter the image to pull",
                 show_input = true,
                 fixed = true,
                 width = 60,
                 height = 10,
                 items = {
-                    { label = "[Submit] Pull Image", value = "submit" }
+                    { label = "⬇ Pull Image", value = "submit_pull", icon = "⬇" }
                 },
-                on_select = function(act_item)
+                on_select = function(act_item, select_mode)
+                    if select_mode == "cancel" then
+                        show_docker_explorer("Images")
+                        return
+                    end
                     local image_to_pull = act_item.input
                     if not image_to_pull or image_to_pull == "" then
                         ascope.notify("No image name entered", "warn")
@@ -261,7 +371,11 @@ local function handle_docker_selection(item)
                 { label = "🔍 Inspect Image", value = "inspect", icon = "🔍" },
                 { label = "🗑 Delete Image", value = "delete", icon = "🗑" }
             },
-            on_select = function(act_item)
+            on_select = function(act_item, select_mode)
+                if select_mode == "cancel" then
+                    show_docker_explorer("Images")
+                    return
+                end
                 if act_item.value == "run" then
                     local safe_name = img_name:gsub("[^%w%.%-]", "_") .. "-run"
                     ascope.notify("Running container " .. safe_name .. "...", "info")
@@ -315,7 +429,11 @@ local function handle_docker_selection(item)
                 { label = "📂 Browse Volume Content", value = "browse", icon = "📂" },
                 { label = "🗑 Delete Volume", value = "delete", icon = "🗑" }
             },
-            on_select = function(act_item)
+            on_select = function(act_item, select_mode)
+                if select_mode == "cancel" then
+                    show_docker_explorer("Volumes")
+                    return
+                end
                 if act_item.value == "browse" then
                     browse_volume(vol_name)
                 elseif act_item.value == "delete" then
@@ -333,18 +451,21 @@ local function handle_docker_selection(item)
     end
 end
 
--- Key binding to toggle the main Docker Explorer modal
-ascope.register_key(key, function()
+-- Show the main Docker Explorer modal
+show_docker_explorer = function(tab_override)
     local containers = {}
     local images = {}
     local volumes = {}
     local completed = 0
+
+    local target_tab = tab_override or last_active_tab
 
     -- Open loading placeholder modal immediately to keep TUI highly responsive
     ascope.open_modal({
         title = "🐳 Docker Explorer",
         subtitle = "Loading docker data...",
         input_title = "Filter your docker",
+        active_tab = target_tab,
         fixed = true,
         width = 95,
         height = 16,
@@ -378,6 +499,7 @@ ascope.register_key(key, function()
                 subtitle = "Containers / Images / Volumes",
                 input_title = "Filter your docker",
                 tabs = { "Containers", "Images", "Volumes" },
+                active_tab = target_tab,
                 fixed = true,
                 width = 95,
                 height = 16,
@@ -449,4 +571,9 @@ ascope.register_key(key, function()
         end
         check_done()
     end)
+end
+
+-- Key binding to toggle the main Docker Explorer modal
+ascope.register_key(key, function()
+    show_docker_explorer()
 end, "Open Docker Explorer")

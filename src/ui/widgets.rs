@@ -968,7 +968,7 @@ fn render_directory_dashboard(f: &mut Frame, state: &AppState, area: Rect, path:
     if has_plugins {
         let mut plugin_items = Vec::new();
         if let Ok(map) = state.dashboard_infos.lock() {
-            for (_, (title, lines)) in map.iter() {
+            for (title, lines) in map.values() {
                 plugin_items.push(Line::from("")); // Spacer before section
                 plugin_items.push(Line::from(Span::styled(
                     format!("  {} ", title),
@@ -2472,14 +2472,31 @@ fn render_plugin_overlay(f: &mut Frame, state: &AppState) {
     };
     f.render_widget(Clear, modal_area);
 
-    let footer = Line::from(vec![
+    let mut footer_spans = vec![
         Span::styled(" [j/k] ", Style::default().fg(Color::Cyan).bold()),
         Span::raw("navigate │"),
         Span::styled(" [Enter] ", Style::default().fg(Color::Green).bold()),
         Span::raw("select │"),
-        Span::styled(" [Esc] ", Style::default().fg(Color::Red).bold()),
-        Span::raw("close"),
-    ]);
+    ];
+
+    if state.plugin_modal_title.contains("Docker")
+        || state.plugin_modal_title.contains("Container")
+        || state.plugin_modal_title.contains("Image")
+    {
+        footer_spans.push(Span::styled(
+            " [d] ",
+            Style::default().fg(Color::Yellow).bold(),
+        ));
+        footer_spans.push(Span::raw("remove │"));
+    }
+
+    footer_spans.push(Span::styled(
+        " [Esc] ",
+        Style::default().fg(Color::Red).bold(),
+    ));
+    footer_spans.push(Span::raw("close"));
+
+    let footer = Line::from(footer_spans);
 
     let block = Block::default()
         .title(Line::from(vec![

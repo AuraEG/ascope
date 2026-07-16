@@ -339,7 +339,15 @@ fn test_plugin_modal_overlay() {
     // Trigger selection callback simulation
     let engine_ref = state.plugin_engine.as_ref().unwrap();
     engine_ref
-        .trigger_modal_select("val2".to_string(), "select".to_string())
+        .trigger_modal_select(
+            ascope::app::PluginOverlayItem {
+                label: "Item 2".to_string(),
+                value: "val2".to_string(),
+                tab: None,
+                icon: None,
+            },
+            "select".to_string(),
+        )
         .unwrap();
 
     // Check that the callback triggered notification in AppState

@@ -368,8 +368,12 @@ impl PluginEngine {
                 }
             }
 
-            let on_select: Function = opts.get("on_select")?;
-            let key = lua.create_registry_value(on_select)?;
+            let on_select: Option<Function> = opts.get("on_select").ok();
+            let key_opt = if let Some(cb) = on_select {
+                Some(lua.create_registry_value(cb)?)
+            } else {
+                None
+            };
 
             let show_input: bool = opts
                 .get::<_, Option<bool>>("show_input")
@@ -381,6 +385,14 @@ impl PluginEngine {
             let width: u16 = opts.get("width").unwrap_or(95);
             let height: u16 = opts.get("height").unwrap_or(90);
             let fixed: bool = opts.get("fixed").unwrap_or(false);
+
+            let active_tab_str: Option<String> = opts.get("active_tab").ok();
+            let mut active_tab_idx = 0;
+            if let Some(ref target_tab) = active_tab_str {
+                if let Some(pos) = tabs.iter().position(|t| t == target_tab) {
+                    active_tab_idx = pos;
+                }
+            }
 
             with_app_state_mut(|state| {
                 state.modal_mode = crate::app::ModalMode::PluginOverlay;
@@ -397,13 +409,13 @@ impl PluginEngine {
                 state.plugin_modal_height = height;
                 state.plugin_modal_fixed = fixed;
                 state.plugin_modal_tabs = tabs;
-                state.plugin_modal_active_tab_index = 0;
+                state.plugin_modal_active_tab_index = active_tab_idx;
                 state.update_plugin_modal_filtering();
             });
 
             with_app_state_mut(|state| {
                 if let Some(ref mut engine) = state.plugin_engine {
-                    *engine.active_modal_callback.borrow_mut() = Some(key);
+                    *engine.active_modal_callback.borrow_mut() = key_opt;
                 }
             });
 
@@ -725,12 +737,19 @@ impl PluginEngine {
         Ok(results)
     }
 
-    pub fn trigger_modal_select(&self, value: String, mode: String) -> Result<(), mlua::Error> {
+    pub fn trigger_modal_select(
+        &self,
+        item: crate::app::PluginOverlayItem,
+        mode: String,
+    ) -> Result<(), mlua::Error> {
         let key_opt = self.active_modal_callback.borrow_mut().take();
         if let Some(key) = key_opt {
             let func: Function = self.lua.registry_value(&key)?;
             let tbl = self.lua.create_table()?;
-            tbl.set("value", value)?;
+            tbl.set("value", item.value)?;
+            tbl.set("label", item.label)?;
+            tbl.set("tab", item.tab)?;
+            tbl.set("icon", item.icon)?;
             let input_val =
                 with_app_state_mut(|state| state.plugin_modal_input.clone()).unwrap_or_default();
             tbl.set("input", input_val)?;
